@@ -1,6 +1,6 @@
 {
   "$schema": "https://schema.tauri.app/config/2",
-  "productName": "gallery2",
+  "productName": "Gallery",
   "version": "0.1.0",
   "identifier": "com.wang.gallery2",
   "build": {
@@ -10,15 +10,14 @@
     "frontendDist": "../dist"
   },
   "app": {
-    "windows": [
-      {
-        "title": "gallery2",
-        "width": 800,
-        "height": 600
-      }
-    ],
+    "withGlobalTauri": true,
+    "windows": [],
     "security": {
-      "csp": null
+      "csp": null,
+      "assetProtocol": {
+        "enable": true,
+        "scope": ["**"]
+      }
     }
   },
   "bundle": {
