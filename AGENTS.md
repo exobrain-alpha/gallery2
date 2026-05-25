@@ -12,7 +12,7 @@
 
 ## Code Style
 
-- 开发过程中所有图标统一使用 `Heroicons` 的 `Solid` 版 `SVG` 图标。
+- 开发过程中所有图标统一使用 `Heroicons` 的 `Solid` 版。
 
 ## Git and Commit Rules
 

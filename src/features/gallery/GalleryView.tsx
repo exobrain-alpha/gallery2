@@ -7,6 +7,7 @@ import { classNames, logError, mediaName, setPageBackground } from "../../utils"
 
 const PAGE_SIZE = 50;
 const OVERSCAN = 1200;
+const MAX_REFERENCE_SELECTION = 3;
 
 interface LayoutItem {
   column: number;
@@ -45,11 +46,13 @@ export function GalleryView() {
   }));
   const [preview, setPreview] = useState<PreviewState>(null);
   const [contextMenu, setContextMenu] = useState<ContextMenuState | null>(null);
+  const [selectedReferenceRecords, setSelectedReferenceRecords] = useState<ImageRecord[]>([]);
   const sentinelRef = useRef<HTMLDivElement | null>(null);
   const editorRef = useRef<EditorDrawerHandle | null>(null);
   const loadingRef = useRef(false);
   const doneRef = useRef(false);
   const recordsRef = useRef<ImageRecord[]>([]);
+  const selectedReferenceRecordsRef = useRef<ImageRecord[]>([]);
 
   useEffect(() => {
     invoke<GalleryPreferences>("get_gallery_preferences")
@@ -87,6 +90,10 @@ export function GalleryView() {
     document.body.classList.toggle("previewing", preview !== null);
     return () => document.body.classList.remove("previewing");
   }, [preview]);
+
+  useEffect(() => {
+    selectedReferenceRecordsRef.current = selectedReferenceRecords;
+  }, [selectedReferenceRecords]);
 
   useEffect(() => {
     const handleClick = (event: MouseEvent) => {
@@ -195,8 +202,44 @@ export function GalleryView() {
     setPreview({ type: "image", src });
   }
 
+  function handleTileClick(event: React.MouseEvent, record: ImageRecord) {
+    if ((event.ctrlKey || event.metaKey) && record.mediaType === "image") {
+      event.preventDefault();
+      setPreview(null);
+      setContextMenu(null);
+      toggleReferenceSelection(record);
+      return;
+    }
+    showPreview(record);
+  }
+
+  function toggleReferenceSelection(record: ImageRecord) {
+    const current = selectedReferenceRecordsRef.current;
+    const exists = current.some((item) => item.path === record.path);
+    const next = exists
+      ? current.filter((item) => item.path !== record.path)
+      : [...current, record].slice(0, MAX_REFERENCE_SELECTION);
+
+    selectedReferenceRecordsRef.current = next;
+    setSelectedReferenceRecords(next);
+
+    if (!exists && next.length === MAX_REFERENCE_SELECTION) {
+      window.requestAnimationFrame(() => {
+        editorRef.current?.open(next).catch((error) => logError(error, "Failed to open editor"));
+        selectedReferenceRecordsRef.current = [];
+        setSelectedReferenceRecords([]);
+      });
+    }
+  }
+
   function showContextMenu(event: React.MouseEvent, record: ImageRecord) {
     event.preventDefault();
+    if ((event.ctrlKey || event.metaKey) && record.mediaType === "image") {
+      setPreview(null);
+      setContextMenu(null);
+      toggleReferenceSelection(record);
+      return;
+    }
     setPreview(null);
     const menuWidth = 118;
     const menuHeight = 40;
@@ -231,9 +274,10 @@ export function GalleryView() {
           const record = records[index];
           const layout = layoutItems[index];
           if (!record || !layout) return null;
+          const selected = selectedReferenceRecords.some((item) => item.path === record.path);
           return (
             <button
-              className="image-tile"
+              className={classNames("image-tile", selected && "is-selected")}
               key={record.path}
               type="button"
               style={{
@@ -241,7 +285,7 @@ export function GalleryView() {
                 height: `${layout.height}px`,
                 transform: `translate3d(${layout.left}px, ${layout.top}px, 0)`,
               }}
-              onClick={() => showPreview(record)}
+              onClick={(event) => handleTileClick(event, record)}
               onContextMenu={(event) => showContextMenu(event, record)}
             >
               {record.mediaType === "video" ? (
@@ -258,6 +302,11 @@ export function GalleryView() {
               ) : (
                 <img loading="lazy" decoding="async" draggable={false} src={convertFileSrc(record.path)} alt={mediaName(record.path)} />
               )}
+              {selected ? (
+                <span className="image-tile-selection-mark">
+                  <Icons.CheckBadge />
+                </span>
+              ) : null}
             </button>
           );
         })}
@@ -281,6 +330,8 @@ export function GalleryView() {
               const record = contextMenu.record;
               setContextMenu(null);
               editorRef.current?.open(record).catch((error) => logError(error, "Failed to open editor"));
+              selectedReferenceRecordsRef.current = [];
+              setSelectedReferenceRecords([]);
             }}
           >
             <Icons.PaintBrush />
@@ -295,7 +346,13 @@ export function GalleryView() {
         pickReferenceImages={() => invoke<PickedImage[]>("pick_xai_reference_images")}
         editImage={(payload) => invoke<XaiEditResult>("edit_image_with_xai", payload)}
         onPreviewAttachment={(attachment) => setPreview({ type: "image", src: attachment.dataUrl || convertFileSrc(attachment.path) })}
-        onToggle={(nextOpen) => document.body.classList.toggle("editing", nextOpen)}
+        onToggle={(nextOpen) => {
+          document.body.classList.toggle("editing", nextOpen);
+          if (nextOpen) {
+            selectedReferenceRecordsRef.current = [];
+            setSelectedReferenceRecords([]);
+          }
+        }}
         onError={(error, label) => logError(error, label)}
       />
     </main>

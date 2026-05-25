@@ -1,4 +1,4 @@
-import { convertFileSrc } from "@tauri-apps/api/core";
+import { convertFileSrc, invoke } from "@tauri-apps/api/core";
 import {
   forwardRef,
   useEffect,
@@ -18,6 +18,7 @@ const DRAWER_ANIMATION_MS = 420;
 const COPY_FEEDBACK_MS = 1100;
 const RETRY_FEEDBACK_MS = 520;
 const IMAGE_COUNT_VALUES = [1, 2, 3, 4];
+const SESSION_SAVE_DEBOUNCE_MS = 260;
 
 const ASPECT_BUTTONS = [
   { key: "auto", kind: "single", values: ["auto"], label: "Auto" },
@@ -48,6 +49,11 @@ interface Message {
   imageCount?: number;
 }
 
+interface EditorSessionState {
+  sessionId: string;
+  messages: Message[];
+}
+
 interface RunPromptOptions {
   prompt: string;
   attachments: Attachment[];
@@ -58,7 +64,7 @@ interface RunPromptOptions {
 }
 
 export interface EditorDrawerHandle {
-  open: (record: ImageRecord) => Promise<void>;
+  open: (record: ImageRecord | ImageRecord[]) => Promise<void>;
   close: () => void;
   isOpen: () => boolean;
 }
@@ -93,16 +99,31 @@ export const EditorDrawer = forwardRef<EditorDrawerHandle, EditorDrawerProps>(fu
   const [selectedAttachments, setSelectedAttachments] = useState<Attachment[]>([]);
   const [messages, setMessages] = useState<Message[]>([]);
   const [actionFeedback, setActionFeedback] = useState<Record<string, string>>({});
+  const [sessionId, setSessionId] = useState("");
+  const [sessionLoaded, setSessionLoaded] = useState(false);
   const inputRef = useRef<HTMLTextAreaElement | null>(null);
   const messagesRef = useRef<HTMLDivElement | null>(null);
   const closeTimerRef = useRef<number>(0);
+  const saveTimerRef = useRef<number>(0);
   const sessionTokenRef = useRef(0);
   const messagesStateRef = useRef<Message[]>([]);
+
+  useEffect(() => {
+    loadCurrentSession().catch((error) => onError(error, "加载会话失败"));
+  }, []);
 
   useEffect(() => {
     messagesStateRef.current = messages;
     messagesRef.current?.scrollTo({ top: messagesRef.current.scrollHeight });
   }, [messages]);
+
+  useEffect(() => {
+    if (!sessionLoaded || !sessionId) return;
+    if (saveTimerRef.current) window.clearTimeout(saveTimerRef.current);
+    saveTimerRef.current = window.setTimeout(() => {
+      persistSession(sessionId, messagesStateRef.current).catch((error) => onError(error, "保存会话失败"));
+    }, SESSION_SAVE_DEBOUNCE_MS);
+  }, [messages, sessionId, sessionLoaded]);
 
   useEffect(() => {
     if (open && !pending) inputRef.current?.focus();
@@ -115,6 +136,7 @@ export const EditorDrawer = forwardRef<EditorDrawerHandle, EditorDrawerProps>(fu
   useEffect(() => {
     return () => {
       if (closeTimerRef.current) window.clearTimeout(closeTimerRef.current);
+      if (saveTimerRef.current) window.clearTimeout(saveTimerRef.current);
     };
   }, []);
 
@@ -122,26 +144,34 @@ export const EditorDrawer = forwardRef<EditorDrawerHandle, EditorDrawerProps>(fu
     open: openDrawer,
     close: closeDrawer,
     isOpen: () => open,
-  }), [open]);
+  }), [open, sessionLoaded]);
 
-  async function openDrawer(record: ImageRecord) {
-    if (!record || record.mediaType !== "image") return;
+  async function openDrawer(record: ImageRecord | ImageRecord[]) {
+    const records = (Array.isArray(record) ? record : [record])
+      .filter((item) => item?.mediaType === "image")
+      .slice(0, MAX_REFERENCES);
+    if (!records.length) return;
     if (closeTimerRef.current) window.clearTimeout(closeTimerRef.current);
     const token = nextSessionToken();
-    const dataUrl = await readImageDataUri(record.path);
-    if (token !== sessionTokenRef.current) return;
-    const sourceAttachment = createAttachment({ path: record.path, dataUrl });
-    if (!sourceAttachment) return;
+    const sourceAttachments = records.map((item) => createAttachment({
+      path: item.path,
+      dataUrl: convertFileSrc(item.path),
+    }));
+    const attachments = sourceAttachments.filter(Boolean) as Attachment[];
+    if (!attachments.length) return;
+    if (!sessionLoaded) {
+      await loadCurrentSession();
+      if (token !== sessionTokenRef.current) return;
+    }
 
     setOpen(false);
     setClosing(false);
-    setPending(false);
     setAspectRatio("auto");
     setResolution(null);
     setImageCount(1);
     setComposerText("");
-    setSelectedAttachments([sourceAttachment]);
-    setMessages([]);
+    setSelectedAttachments(attachments);
+    setActionFeedback({});
     window.requestAnimationFrame(() => {
       setOpen(true);
       onToggle(true);
@@ -150,21 +180,25 @@ export const EditorDrawer = forwardRef<EditorDrawerHandle, EditorDrawerProps>(fu
 
   function closeDrawer() {
     if (!open && !closing) return;
-    nextSessionToken();
     setOpen(false);
     setClosing(true);
     onToggle(false);
     closeTimerRef.current = window.setTimeout(() => {
       setClosing(false);
-      setPending(false);
       setAspectRatio("auto");
       setResolution(null);
       setImageCount(1);
       setComposerText("");
       setSelectedAttachments([]);
-      setMessages([]);
       setActionFeedback({});
     }, DRAWER_ANIMATION_MS);
+  }
+
+  async function loadCurrentSession() {
+    const state = await invoke<EditorSessionState>("load_editor_session");
+    setSessionId(state.sessionId);
+    setMessages(normalizePersistedMessages(state.messages));
+    setSessionLoaded(true);
   }
 
   function nextSessionToken() {
@@ -244,7 +278,6 @@ export const EditorDrawer = forwardRef<EditorDrawerHandle, EditorDrawerProps>(fu
   }
 
   async function runPrompt({ prompt, attachments, aspectRatio, resolution, imageCount, clearComposer }: RunPromptOptions) {
-    const token = sessionTokenRef.current;
     const userAttachments = attachments.map((item) => ({ ...item }));
     const normalizedImageCount = normalizeImageCount(imageCount);
     const pendingMessage = createMessage("assistant", "", [], { pending: true });
@@ -264,7 +297,6 @@ export const EditorDrawer = forwardRef<EditorDrawerHandle, EditorDrawerProps>(fu
 
     try {
       const sourceDataUris = await Promise.all(userAttachments.map(imageInputForRequest));
-      if (token !== sessionTokenRef.current) return;
 
       const result = await editImage({
         sourcePaths: userAttachments.map((item) => item.path),
@@ -274,7 +306,6 @@ export const EditorDrawer = forwardRef<EditorDrawerHandle, EditorDrawerProps>(fu
         resolution,
         imageCount: normalizedImageCount,
       });
-      if (token !== sessionTokenRef.current) return;
 
       const resultPaths = Array.isArray(result.paths) && result.paths.length ? result.paths : [result.path];
       const outputAttachments = resultPaths
@@ -287,7 +318,6 @@ export const EditorDrawer = forwardRef<EditorDrawerHandle, EditorDrawerProps>(fu
       setSelectedAttachments(outputAttachments.slice(0, MAX_REFERENCES));
       setPending(false);
     } catch (error) {
-      if (token !== sessionTokenRef.current) return;
       setMessages((current) => current.map((item) => (
         item.id === pendingMessage.id
           ? createMessage("assistant", formatErrorMessage(error, "生成失败"), [], { tone: "error" })
@@ -314,6 +344,8 @@ export const EditorDrawer = forwardRef<EditorDrawerHandle, EditorDrawerProps>(fu
   async function copyMessage(messageId: string | undefined) {
     const message = messagesStateRef.current.find((item) => item.id === messageId);
     if (!message?.content) return;
+    setComposerText(message.content);
+    window.requestAnimationFrame(() => inputRef.current?.focus());
     await navigator.clipboard.writeText(message.content);
   }
 
@@ -408,7 +440,7 @@ export const EditorDrawer = forwardRef<EditorDrawerHandle, EditorDrawerProps>(fu
                     disabled={pending}
                     onClick={() => setSelectedAttachments((current) => current.filter((item) => item.path !== attachment.path))}
                   >
-                    <img src={sourceForAttachment(attachment)} alt="" />
+                    <img src={sourceForAttachment(attachment)} alt="" loading="lazy" decoding="async" />
                   </button>
                 ))}
               </div>
@@ -446,6 +478,13 @@ export const EditorDrawer = forwardRef<EditorDrawerHandle, EditorDrawerProps>(fu
     return readImageDataUri(attachment.path);
   }
 });
+
+async function persistSession(sessionId: string, messages: Message[]) {
+  await invoke("save_editor_session", {
+    sessionId,
+    messages: serializeMessages(messages),
+  });
+}
 
 function MessageView({
   message,
@@ -498,7 +537,7 @@ function MessageView({
           onClick={() => onPreview(attachment)}
           onContextMenu={(event) => onAttachmentContextMenu(event, attachment)}
         >
-          <img src={sourceForAttachment(attachment)} alt="" />
+          <img src={sourceForAttachment(attachment)} alt="" loading="lazy" decoding="async" />
         </button>
       ))}
     </div>
@@ -574,6 +613,42 @@ function createMessage(role: Role, content: string, attachments: Attachment[] = 
 
 function sourceForAttachment(attachment: Attachment) {
   return attachment.dataUrl || attachment.dataUri || convertFileSrc(attachment.path || "");
+}
+
+function normalizePersistedMessages(messages: Message[]) {
+  return messages
+    .filter((message) => message.role === "user" || message.role === "assistant")
+    .map<Message>((message) => ({
+      ...message,
+      pending: false,
+      tone: message.tone === "error" ? "error" : "",
+      attachments: normalizePersistedAttachments(message.attachments),
+      imageCount: normalizeImageCount(message.imageCount),
+    }));
+}
+
+function normalizePersistedAttachments(attachments: Attachment[]) {
+  return (Array.isArray(attachments) ? attachments : [])
+    .filter((attachment) => attachment?.path)
+    .map((attachment) => ({
+      path: attachment.path,
+      label: attachment.label || mediaName(attachment.path),
+    }));
+}
+
+function serializeMessages(messages: Message[]) {
+  return messages
+    .filter((message) => !message.pending)
+    .map((message) => ({
+      id: message.id,
+      role: message.role,
+      content: message.content,
+      attachments: normalizePersistedAttachments(message.attachments),
+      tone: message.tone || null,
+      aspectRatio: message.aspectRatio || null,
+      resolution: message.resolution || null,
+      imageCount: normalizeImageCount(message.imageCount),
+    }));
 }
 
 function normalizePickedReferences(picked: PickedImage[]) {

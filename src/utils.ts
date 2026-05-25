@@ -62,6 +62,9 @@ export function formatErrorMessage(error: unknown, fallback = "操作失败") {
   if (/content moderation|内容审核/i.test(message)) {
     return "内容审核未通过，请调整提示词或参考图后重试";
   }
+  if (/billing|balance|credits?|quota|insufficient|payment|funds|spend|usage limit|额度|余额|费用|充值|账单/i.test(message)) {
+    return "xAI 账户额度不足，请充值或调整账单后重试";
+  }
   if (/xai key/i.test(message) && /未设置|missing|empty/i.test(message)) {
     return "请先设置 xAI Key";
   }

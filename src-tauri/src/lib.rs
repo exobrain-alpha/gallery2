@@ -25,6 +25,7 @@ const GALLERY_LABEL: &str = "gallery";
 const SETTINGS_MENU_ID: &str = "open_settings";
 const GALLERY_MENU_ID: &str = "open_gallery";
 const DEDUPE_MAX_FILE_SIZE: u64 = 100 * 1024 * 1024;
+const EDITOR_SESSION_SEGMENT_TURNS: usize = 100;
 
 fn tray_icon() -> Option<tauri::image::Image<'static>> {
     let icon = image::load_from_memory(include_bytes!("../icons/bar-icon.png"))
@@ -63,7 +64,7 @@ struct SettingsState {
     min_column_width: u32,
 }
 
-#[derive(Debug, Deserialize, Serialize)]
+#[derive(Debug, Deserialize, Serialize, Clone)]
 #[serde(rename_all = "camelCase")]
 struct XaiEditArchiveEntry {
     source_path: String,
@@ -76,6 +77,50 @@ struct XaiEditArchiveEntry {
     output_paths: Vec<String>,
     response: serde_json::Value,
     created_at: i64,
+}
+
+#[derive(Debug, Deserialize, Serialize, Clone)]
+#[serde(rename_all = "camelCase")]
+struct EditorSessionAttachment {
+    path: String,
+    label: String,
+}
+
+#[derive(Debug, Deserialize, Serialize, Clone)]
+#[serde(rename_all = "camelCase")]
+struct EditorSessionMessage {
+    id: String,
+    role: String,
+    content: String,
+    attachments: Vec<EditorSessionAttachment>,
+    tone: Option<String>,
+    aspect_ratio: Option<String>,
+    resolution: Option<String>,
+    image_count: Option<u8>,
+}
+
+#[derive(Debug, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct EditorSessionMeta {
+    current_session_id: String,
+    updated_at: i64,
+}
+
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct EditorSessionState {
+    session_id: String,
+    messages: Vec<EditorSessionMessage>,
+}
+
+#[derive(Debug, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct EditorSessionSegment {
+    session_id: String,
+    segment_index: usize,
+    messages: Vec<EditorSessionMessage>,
+    created_at: i64,
+    updated_at: i64,
 }
 
 #[derive(Debug, Serialize)]
@@ -153,6 +198,66 @@ fn app_data_dir(app: &tauri::AppHandle) -> Result<PathBuf, String> {
     fs::create_dir_all(&dir)
         .map_err(|err| format!("Failed to create app data directory: {err}"))?;
     Ok(dir)
+}
+
+fn editor_sessions_dir(app: &tauri::AppHandle) -> Result<PathBuf, String> {
+    let dir = app_data_dir(app)?.join("editor-sessions");
+    fs::create_dir_all(&dir)
+        .map_err(|err| format!("Failed to create editor sessions directory: {err}"))?;
+    Ok(dir)
+}
+
+fn editor_session_meta_path(app: &tauri::AppHandle) -> Result<PathBuf, String> {
+    Ok(editor_sessions_dir(app)?.join("meta.json"))
+}
+
+fn new_editor_session_id() -> String {
+    let nanos = UNIX_EPOCH
+        .elapsed()
+        .map(|duration| duration.as_nanos())
+        .unwrap_or(0);
+    format!("session-{nanos}")
+}
+
+fn validate_editor_session_id(session_id: &str) -> Result<(), String> {
+    if session_id.is_empty()
+        || !session_id
+            .chars()
+            .all(|character| character.is_ascii_alphanumeric() || character == '-' || character == '_')
+    {
+        return Err("Invalid editor session id".to_string());
+    }
+    Ok(())
+}
+
+fn write_editor_session_meta(app: &tauri::AppHandle, session_id: &str) -> Result<(), String> {
+    validate_editor_session_id(session_id)?;
+    let meta = EditorSessionMeta {
+        current_session_id: session_id.to_string(),
+        updated_at: now_secs(),
+    };
+    let json = serde_json::to_vec_pretty(&meta)
+        .map_err(|err| format!("Failed to serialize editor session metadata: {err}"))?;
+    fs::write(editor_session_meta_path(app)?, json)
+        .map_err(|err| format!("Failed to write editor session metadata: {err}"))?;
+    Ok(())
+}
+
+fn current_editor_session_id(app: &tauri::AppHandle) -> Result<String, String> {
+    let meta_path = editor_session_meta_path(app)?;
+    if meta_path.exists() {
+        let bytes = fs::read(&meta_path)
+            .map_err(|err| format!("Failed to read editor session metadata: {err}"))?;
+        if let Ok(meta) = serde_json::from_slice::<EditorSessionMeta>(&bytes) {
+            if validate_editor_session_id(&meta.current_session_id).is_ok() {
+                return Ok(meta.current_session_id);
+            }
+        }
+    }
+
+    let session_id = new_editor_session_id();
+    write_editor_session_meta(app, &session_id)?;
+    Ok(session_id)
 }
 
 fn default_generated_content_dir(app: &tauri::AppHandle) -> Result<PathBuf, String> {
@@ -802,6 +907,10 @@ fn format_xai_http_error(status: reqwest::StatusCode, body: &[u8]) -> String {
         return "内容审核未通过，请调整提示词或参考图后重试".to_string();
     }
 
+    if is_xai_billing_error(&normalized) {
+        return "xAI 账户额度不足，请充值或调整账单后重试".to_string();
+    }
+
     match status.as_u16() {
         400 => detail
             .or(code)
@@ -816,6 +925,28 @@ fn format_xai_http_error(status: reqwest::StatusCode, body: &[u8]) -> String {
             .map(|message| format!("xAI 请求失败：{message}"))
             .unwrap_or_else(|| format!("xAI 请求失败（HTTP {status}）")),
     }
+}
+
+fn is_xai_billing_error(message: &str) -> bool {
+    [
+        "billing",
+        "balance",
+        "credit",
+        "credits",
+        "quota",
+        "insufficient",
+        "payment",
+        "funds",
+        "spend",
+        "usage limit",
+        "额度",
+        "余额",
+        "费用",
+        "充值",
+        "账单",
+    ]
+    .iter()
+    .any(|keyword| message.contains(keyword))
 }
 
 async fn run_xai_edit_request(
@@ -1898,6 +2029,113 @@ fn validate_xai_image_resolution(resolution: &str) -> Result<(), String> {
 }
 
 #[tauri::command]
+fn load_editor_session(app: tauri::AppHandle) -> Result<EditorSessionState, String> {
+    let session_id = current_editor_session_id(&app)?;
+    let session_dir = editor_sessions_dir(&app)?.join(&session_id);
+    if !session_dir.exists() {
+        return Ok(EditorSessionState {
+            session_id,
+            messages: Vec::new(),
+        });
+    }
+
+    let mut segment_paths = fs::read_dir(&session_dir)
+        .map_err(|err| format!("Failed to read editor session directory: {err}"))?
+        .filter_map(|entry| entry.ok().map(|entry| entry.path()))
+        .filter(|path| {
+            path.file_name()
+                .and_then(|name| name.to_str())
+                .map(|name| name.starts_with("segment-") && name.ends_with(".json"))
+                .unwrap_or(false)
+        })
+        .collect::<Vec<_>>();
+    segment_paths.sort();
+
+    let mut messages = Vec::new();
+    for path in segment_paths {
+        let bytes = fs::read(&path)
+            .map_err(|err| format!("Failed to read editor session segment: {err}"))?;
+        let segment = serde_json::from_slice::<EditorSessionSegment>(&bytes)
+            .map_err(|err| format!("Failed to parse editor session segment: {err}"))?;
+        if segment.session_id == session_id {
+            messages.extend(segment.messages);
+        }
+    }
+
+    Ok(EditorSessionState {
+        session_id,
+        messages,
+    })
+}
+
+#[tauri::command]
+fn save_editor_session(
+    app: tauri::AppHandle,
+    session_id: String,
+    messages: Vec<EditorSessionMessage>,
+) -> Result<(), String> {
+    validate_editor_session_id(&session_id)?;
+    write_editor_session_meta(&app, &session_id)?;
+    let session_dir = editor_sessions_dir(&app)?.join(&session_id);
+    fs::create_dir_all(&session_dir)
+        .map_err(|err| format!("Failed to create editor session directory: {err}"))?;
+
+    for entry in fs::read_dir(&session_dir)
+        .map_err(|err| format!("Failed to inspect editor session directory: {err}"))?
+        .flatten()
+    {
+        let path = entry.path();
+        let is_segment = path
+            .file_name()
+            .and_then(|name| name.to_str())
+            .map(|name| name.starts_with("segment-") && name.ends_with(".json"))
+            .unwrap_or(false);
+        if is_segment {
+            fs::remove_file(path)
+                .map_err(|err| format!("Failed to remove old editor session segment: {err}"))?;
+        }
+    }
+
+    let now = now_secs();
+    let mut segments: Vec<Vec<EditorSessionMessage>> = Vec::new();
+    let mut current_segment: Vec<EditorSessionMessage> = Vec::new();
+    let mut turn_count = 0usize;
+
+    for message in messages {
+        if message.role == "user" && turn_count >= EDITOR_SESSION_SEGMENT_TURNS {
+            segments.push(current_segment);
+            current_segment = Vec::new();
+            turn_count = 0;
+        }
+        if message.role == "user" {
+            turn_count += 1;
+        }
+        current_segment.push(message);
+    }
+
+    if !current_segment.is_empty() {
+        segments.push(current_segment);
+    }
+
+    for (segment_index, segment_messages) in segments.into_iter().enumerate() {
+        let segment = EditorSessionSegment {
+            session_id: session_id.clone(),
+            segment_index,
+            messages: segment_messages,
+            created_at: now,
+            updated_at: now,
+        };
+        let json = serde_json::to_vec_pretty(&segment)
+            .map_err(|err| format!("Failed to serialize editor session segment: {err}"))?;
+        let segment_path = session_dir.join(format!("segment-{segment_index:05}.json"));
+        fs::write(segment_path, json)
+            .map_err(|err| format!("Failed to write editor session segment: {err}"))?;
+    }
+
+    Ok(())
+}
+
+#[tauri::command]
 fn list_images(app: tauri::AppHandle, offset: i64, limit: i64) -> Result<Vec<ImageRecord>, String> {
     let conn = open_db(&app)?;
     let limit = limit.clamp(1, 120);
@@ -1985,6 +2223,8 @@ pub fn run() {
             save_generated_image,
             archive_xai_edit,
             edit_image_with_xai,
+            load_editor_session,
+            save_editor_session,
             list_images
         ])
         .run(tauri::generate_context!())

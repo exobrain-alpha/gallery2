@@ -661,6 +661,36 @@ textarea:focus {
   filter: saturate(1.06) contrast(1.04);
 }
 
+.image-tile.is-selected img,
+.image-tile.is-selected video {
+  filter: saturate(1.04) contrast(1.02) brightness(0.86);
+}
+
+.image-tile-selection-mark {
+  position: absolute;
+  top: 8px;
+  right: 8px;
+  z-index: 2;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 1.7rem;
+  height: 1.7rem;
+  border-radius: 999px;
+  color: #ffffff;
+  background: rgba(23, 23, 23, 0.72);
+  box-shadow:
+    0 8px 18px rgba(0, 0, 0, 0.28),
+    inset 0 0 0 1px rgba(255, 255, 255, 0.22);
+  pointer-events: none;
+}
+
+.image-tile-selection-mark svg {
+  width: 1.18rem;
+  height: 1.18rem;
+  fill: currentColor;
+}
+
 .gallery-spacer {
   min-height: 100vh;
 }
@@ -878,7 +908,12 @@ textarea:focus {
   background: var(--editor-resolution-active-background, rgba(23, 23, 23, 0.12));
 }
 
-.editor-icon-button svg,
+.editor-icon-button svg {
+  width: 18px;
+  height: 18px;
+  fill: currentColor;
+}
+
 .editor-send-button svg {
   width: 1rem;
   height: 1rem;
@@ -899,6 +934,8 @@ textarea:focus {
   display: flex;
   flex-direction: column;
   gap: 10px;
+  content-visibility: auto;
+  contain-intrinsic-size: 240px;
 }
 
 .editor-message-assistant {
@@ -1105,7 +1142,7 @@ textarea:focus {
   align-self: flex-start;
   position: relative;
   flex: 0 0 auto;
-  max-width: 280px;
+  max-width: 282px;
   padding: 0;
   border: 0;
   border-radius: 10px;
@@ -1128,7 +1165,7 @@ textarea:focus {
 
 .editor-message-user .editor-attachment-card img {
   display: block;
-  height: 120px;
+  height: 122px;
   border-radius: 0;
   background: var(--editor-media-background, rgba(255, 255, 255, 0.16));
 }
@@ -1163,7 +1200,7 @@ textarea:focus {
 .editor-selected-card {
   position: relative;
   flex: 0 0 auto;
-  height: 74px;
+  height: 76px;
   padding: 0;
   border: 1px solid var(--editor-border, rgba(0, 0, 0, 0.08));
   border-radius: 10px;
