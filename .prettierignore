@@ -1,0 +1,6 @@
+src-tauri/target
+dist
+dist-ssr
+node_modules
+*.svg
+Cargo.lock
