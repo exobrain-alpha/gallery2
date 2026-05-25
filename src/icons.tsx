@@ -7,6 +7,8 @@ import {
   FolderIcon,
   PaintBrushIcon,
   PlusIcon,
+  PuzzlePieceIcon,
+  VideoCameraIcon,
   XMarkIcon,
 } from "@heroicons/react/24/solid";
 
@@ -20,4 +22,6 @@ export const Icons = {
   ClipboardDocument: ClipboardDocumentIcon,
   ArrowTopRight: ArrowTopRightOnSquareIcon,
   CheckBadge: CheckBadgeIcon,
+  PuzzlePiece: PuzzlePieceIcon,
+  VideoCamera: VideoCameraIcon,
 };

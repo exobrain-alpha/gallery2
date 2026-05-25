@@ -1,5 +1,5 @@
 import { convertFileSrc, invoke } from "@tauri-apps/api/core";
-import { useEffect, useMemo, useRef, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { EditorDrawer, type EditorDrawerHandle } from "../editor/EditorDrawer";
 import { Icons } from "../../icons";
 import type { GalleryPreferences, ImageRecord, PickedImage, XaiEditResult } from "../../types";
@@ -8,6 +8,8 @@ import { classNames, logError, mediaName, setPageBackground } from "../../utils"
 const PAGE_SIZE = 50;
 const OVERSCAN = 1200;
 const MAX_REFERENCE_SELECTION = 3;
+const MAX_PLAYING_TILE_VIDEOS = 10;
+const TILE_VIDEO_PREVIEW_TIME = 0.08;
 
 interface LayoutItem {
   column: number;
@@ -53,6 +55,7 @@ export function GalleryView() {
   const doneRef = useRef(false);
   const recordsRef = useRef<ImageRecord[]>([]);
   const selectedReferenceRecordsRef = useRef<ImageRecord[]>([]);
+  const playingVideosRef = useRef<Map<string, HTMLVideoElement>>(new Map());
 
   useEffect(() => {
     invoke<GalleryPreferences>("get_gallery_preferences")
@@ -145,6 +148,15 @@ export function GalleryView() {
     return () => observer.disconnect();
   }, [preferences]);
 
+  useEffect(() => {
+    return () => {
+      for (const video of playingVideosRef.current.values()) {
+        pauseVideoElement(video);
+      }
+      playingVideosRef.current.clear();
+    };
+  }, []);
+
   const gapSize = preferences?.hasGap ? 12 : 0;
   const minColumnWidth = Math.min(600, Math.max(100, preferences?.minColumnWidth || 280));
   const layoutItems = useMemo(
@@ -189,6 +201,9 @@ export function GalleryView() {
 
   function showPreview(record: ImageRecord) {
     setContextMenu(null);
+    if (record.mediaType === "video") {
+      pauseTileVideo(record.path);
+    }
     const src = convertFileSrc(record.path);
     if (record.mediaType === "video") {
       setPreview({
@@ -201,6 +216,32 @@ export function GalleryView() {
     }
     setPreview({ type: "image", src });
   }
+
+  const playTileVideo = useCallback((path: string, video: HTMLVideoElement | null) => {
+    if (!video) return;
+    const playingVideos = playingVideosRef.current;
+    if (playingVideos.has(path)) {
+      playingVideos.delete(path);
+    }
+    playingVideos.set(path, video);
+
+    while (playingVideos.size > MAX_PLAYING_TILE_VIDEOS) {
+      const oldest = playingVideos.entries().next().value;
+      if (!oldest) break;
+      const [oldestPath, oldestVideo] = oldest;
+      playingVideos.delete(oldestPath);
+      pauseVideoElement(oldestVideo);
+    }
+
+    video.play().catch((error) => logError(error, "Failed to play gallery video"));
+  }, []);
+
+  const pauseTileVideo = useCallback((path: string) => {
+    const video = playingVideosRef.current.get(path);
+    if (!video) return;
+    playingVideosRef.current.delete(path);
+    pauseVideoElement(video);
+  }, []);
 
   function handleTileClick(event: React.MouseEvent, record: ImageRecord) {
     if ((event.ctrlKey || event.metaKey) && record.mediaType === "image") {
@@ -289,22 +330,17 @@ export function GalleryView() {
               onContextMenu={(event) => showContextMenu(event, record)}
             >
               {record.mediaType === "video" ? (
-                <video
-                  src={convertFileSrc(record.path)}
-                  muted
-                  autoPlay
-                  loop
-                  playsInline
-                  controls={false}
-                  preload="metadata"
-                  draggable={false}
+                <VideoTile
+                  record={record}
+                  onPlay={playTileVideo}
+                  onRemove={pauseTileVideo}
                 />
               ) : (
                 <img loading="lazy" decoding="async" draggable={false} src={convertFileSrc(record.path)} alt={mediaName(record.path)} />
               )}
               {selected ? (
-                <span className="image-tile-selection-mark">
-                  <Icons.CheckBadge />
+                <span className="image-tile-badge image-tile-selection-mark">
+                  <Icons.PuzzlePiece />
                 </span>
               ) : null}
             </button>
@@ -326,6 +362,7 @@ export function GalleryView() {
         <div className="context-menu" id="context-menu" style={{ left: contextMenu.left, top: contextMenu.top }}>
           <button
             type="button"
+            disabled={contextMenu.record.mediaType !== "image"}
             onClick={() => {
               const record = contextMenu.record;
               setContextMenu(null);
@@ -359,6 +396,46 @@ export function GalleryView() {
   );
 }
 
+function VideoTile({
+  record,
+  onPlay,
+  onRemove,
+}: {
+  record: ImageRecord;
+  onPlay: (path: string, video: HTMLVideoElement | null) => void;
+  onRemove: (path: string) => void;
+}) {
+  const videoRef = useRef<HTMLVideoElement | null>(null);
+
+  useEffect(() => {
+    return () => onRemove(record.path);
+  }, [record.path, onRemove]);
+
+  return (
+    <>
+      <video
+        ref={videoRef}
+        src={convertFileSrc(record.path)}
+        muted
+        loop
+        playsInline
+        controls={false}
+        preload="metadata"
+        draggable={false}
+        onLoadedMetadata={(event) => primeTileVideoFrame(event.currentTarget)}
+      />
+      <span
+        className="video-tile-hover-target"
+        onMouseEnter={() => onPlay(record.path, videoRef.current)}
+      >
+        <span className="image-tile-badge video-tile-kind-mark">
+          <Icons.VideoCamera />
+        </span>
+      </span>
+    </>
+  );
+}
+
 function PreviewOverlay({ preview, onClose }: { preview: PreviewState; onClose: () => void }) {
   if (!preview) return null;
   if (preview.type === "video") {
@@ -388,6 +465,21 @@ function PreviewOverlay({ preview, onClose }: { preview: PreviewState; onClose: 
       </figure>
     </div>
   );
+}
+
+function pauseVideoElement(video: HTMLVideoElement) {
+  video.pause();
+}
+
+function primeTileVideoFrame(video: HTMLVideoElement) {
+  if (!Number.isFinite(video.duration) || video.duration <= 0) return;
+  if (video.currentTime > 0) return;
+  const targetTime = Math.min(TILE_VIDEO_PREVIEW_TIME, Math.max(0.001, video.duration * 0.02));
+  try {
+    video.currentTime = targetTime;
+  } catch (error) {
+    logError(error, "Failed to seek gallery video preview frame");
+  }
 }
 
 function buildLayout(records: ImageRecord[], viewportWidth: number, gapSize: number, minColumnWidth: number): LayoutItem[] {
