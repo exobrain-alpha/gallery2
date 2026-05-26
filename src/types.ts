@@ -2,6 +2,7 @@ export type MediaType = "image" | "video";
 
 export interface ImageRecord {
   path: string;
+  displayPath: string;
   mediaType: MediaType;
   width: number;
   height: number;
@@ -9,11 +10,23 @@ export interface ImageRecord {
   size: number;
 }
 
+export interface ImageCursor {
+  modified: number;
+  path: string;
+}
+
+export interface ImagePage {
+  items: ImageRecord[];
+  nextCursor: ImageCursor | null;
+}
+
 export interface SettingsState {
   paths: string[];
   imageCount: number;
   dbPath: string;
   generatedContentDir: string;
+  thumbnailEnabled: boolean;
+  thumbnailDir: string;
   xaiKey: string;
   galleryMode: string;
   galleryHasGap: boolean;
@@ -32,6 +45,17 @@ export interface ScanSummary {
   skipped: number;
   removed: number;
   total: number;
+}
+
+export interface ThumbnailProgress {
+  running: boolean;
+  stage: string;
+  processed: number;
+  total: number;
+  generated: number;
+  skipped: number;
+  message: string;
+  error: string;
 }
 
 export interface DedupeSummary {

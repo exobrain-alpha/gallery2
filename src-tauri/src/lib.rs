@@ -1,31 +1,45 @@
-use image::{ImageFormat, ImageReader};
+mod gallery;
+mod models;
+mod scanner;
+
+use aes_gcm::{
+    aead::{Aead, AeadCore, KeyInit, OsRng},
+    Aes256Gcm,
+};
+use image::{codecs::jpeg::JpegEncoder, ImageFormat, ImageReader};
+use models::*;
 #[cfg(target_os = "macos")]
 use objc2_app_kit::{NSWindow, NSWindowCollectionBehavior};
 use rusqlite::{params, Connection};
-use serde::{Deserialize, Serialize};
+use sha2::{Digest, Sha256};
 use std::{
     collections::HashMap,
-    fs,
+    env, fs,
     io::{Read, Seek, SeekFrom},
     path::{Path, PathBuf},
+    sync::{Arc, Mutex},
     time::UNIX_EPOCH,
 };
+#[cfg(target_os = "macos")]
+use tauri::TitleBarStyle;
 use tauri::{
     menu::{Menu, MenuItem},
     tray::TrayIconBuilder,
     window::Color,
     Manager, Theme, WebviewUrl, WebviewWindow, WebviewWindowBuilder, WindowEvent,
 };
-#[cfg(target_os = "macos")]
-use tauri::TitleBarStyle;
 use tauri_plugin_dialog::DialogExt;
 
 const SETTINGS_LABEL: &str = "settings";
-const GALLERY_LABEL: &str = "gallery";
+pub(crate) const GALLERY_LABEL: &str = "gallery";
 const SETTINGS_MENU_ID: &str = "open_settings";
 const GALLERY_MENU_ID: &str = "open_gallery";
-const DEDUPE_MAX_FILE_SIZE: u64 = 100 * 1024 * 1024;
+pub(crate) const DEDUPE_MAX_FILE_SIZE: u64 = 100 * 1024 * 1024;
 const EDITOR_SESSION_SEGMENT_TURNS: usize = 100;
+const ENCRYPTED_XAI_KEY_PREFIX: &str = "enc:v1:";
+pub(crate) const THUMBNAIL_MAX_EDGE: u32 = 768;
+pub(crate) const THUMBNAIL_QUALITY: u8 = 82;
+type ThumbnailProgressState = Arc<Mutex<ThumbnailProgress>>;
 
 fn tray_icon() -> Option<tauri::image::Image<'static>> {
     let icon = image::load_from_memory(include_bytes!("../icons/bar-icon.png"))
@@ -39,148 +53,20 @@ fn tray_icon() -> Option<tauri::image::Image<'static>> {
     ))
 }
 
-#[derive(Debug, Serialize)]
-#[serde(rename_all = "camelCase")]
-struct ImageRecord {
-    path: String,
-    media_type: String,
-    width: u32,
-    height: u32,
-    modified: i64,
-    size: i64,
+fn initial_thumbnail_progress() -> ThumbnailProgress {
+    ThumbnailProgress {
+        running: false,
+        stage: "idle".to_string(),
+        processed: 0,
+        total: 0,
+        generated: 0,
+        skipped: 0,
+        message: String::new(),
+        error: String::new(),
+    }
 }
 
-#[derive(Debug, Serialize)]
-#[serde(rename_all = "camelCase")]
-struct SettingsState {
-    paths: Vec<String>,
-    image_count: i64,
-    db_path: String,
-    generated_content_dir: String,
-    xai_key: String,
-    gallery_mode: String,
-    gallery_has_gap: bool,
-    gallery_theme: String,
-    min_column_width: u32,
-}
-
-#[derive(Debug, Deserialize, Serialize, Clone)]
-#[serde(rename_all = "camelCase")]
-struct XaiEditArchiveEntry {
-    source_path: String,
-    source_label: String,
-    prompt: String,
-    aspect_ratio: Option<String>,
-    resolution: Option<String>,
-    image_count: u8,
-    output_path: Option<String>,
-    output_paths: Vec<String>,
-    response: serde_json::Value,
-    created_at: i64,
-}
-
-#[derive(Debug, Deserialize, Serialize, Clone)]
-#[serde(rename_all = "camelCase")]
-struct EditorSessionAttachment {
-    path: String,
-    label: String,
-}
-
-#[derive(Debug, Deserialize, Serialize, Clone)]
-#[serde(rename_all = "camelCase")]
-struct EditorSessionMessage {
-    id: String,
-    role: String,
-    content: String,
-    attachments: Vec<EditorSessionAttachment>,
-    tone: Option<String>,
-    aspect_ratio: Option<String>,
-    resolution: Option<String>,
-    image_count: Option<u8>,
-}
-
-#[derive(Debug, Deserialize, Serialize)]
-#[serde(rename_all = "camelCase")]
-struct EditorSessionMeta {
-    current_session_id: String,
-    updated_at: i64,
-}
-
-#[derive(Debug, Serialize)]
-#[serde(rename_all = "camelCase")]
-struct EditorSessionState {
-    session_id: String,
-    messages: Vec<EditorSessionMessage>,
-}
-
-#[derive(Debug, Deserialize, Serialize)]
-#[serde(rename_all = "camelCase")]
-struct EditorSessionSegment {
-    session_id: String,
-    segment_index: usize,
-    messages: Vec<EditorSessionMessage>,
-    created_at: i64,
-    updated_at: i64,
-}
-
-#[derive(Debug, Serialize)]
-#[serde(rename_all = "camelCase")]
-struct SavedGeneratedImage {
-    path: String,
-}
-
-#[derive(Debug, Serialize)]
-#[serde(rename_all = "camelCase")]
-struct PickedImage {
-    path: String,
-    data_uri: String,
-}
-
-#[derive(Debug, Serialize)]
-#[serde(rename_all = "camelCase")]
-struct XaiEditResult {
-    path: String,
-    paths: Vec<String>,
-    response: serde_json::Value,
-}
-
-#[derive(Debug, Serialize)]
-#[serde(rename_all = "camelCase")]
-struct GalleryPreferences {
-    has_gap: bool,
-    theme: String,
-    min_column_width: u32,
-}
-
-#[derive(Debug, Serialize)]
-#[serde(rename_all = "camelCase")]
-struct ScanSummary {
-    indexed: usize,
-    skipped: usize,
-    removed: usize,
-    total: i64,
-}
-
-#[derive(Debug, Serialize)]
-#[serde(rename_all = "camelCase")]
-struct DedupeSummary {
-    checked: usize,
-    duplicates: usize,
-    moved: usize,
-    skipped: usize,
-    total: i64,
-    max_file_size: u64,
-}
-
-#[derive(Debug, Serialize)]
-#[serde(rename_all = "camelCase")]
-struct ExtensionRepairSummary {
-    repaired: usize,
-    skipped: usize,
-    total: i64,
-}
-
-fn db_path(app: &tauri::AppHandle) -> Result<PathBuf, String> {
+pub(crate) fn db_path(app: &tauri::AppHandle) -> Result<PathBuf, String> {
     let dir = app
         .path()
         .app_data_dir()
@@ -190,7 +76,7 @@ fn db_path(app: &tauri::AppHandle) -> Result<PathBuf, String> {
     Ok(dir.join("gallery.sqlite3"))
 }
 
-fn app_data_dir(app: &tauri::AppHandle) -> Result<PathBuf, String> {
+pub(crate) fn app_data_dir(app: &tauri::AppHandle) -> Result<PathBuf, String> {
     let dir = app
         .path()
         .app_data_dir()
@@ -221,9 +107,9 @@ fn new_editor_session_id() -> String {
 
 fn validate_editor_session_id(session_id: &str) -> Result<(), String> {
     if session_id.is_empty()
-        || !session_id
-            .chars()
-            .all(|character| character.is_ascii_alphanumeric() || character == '-' || character == '_')
+        || !session_id.chars().all(|character| {
+            character.is_ascii_alphanumeric() || character == '-' || character == '_'
+        })
     {
         return Err("Invalid editor session id".to_string());
     }
@@ -260,11 +146,15 @@ fn current_editor_session_id(app: &tauri::AppHandle) -> Result<String, String> {
     Ok(session_id)
 }
 
-fn default_generated_content_dir(app: &tauri::AppHandle) -> Result<PathBuf, String> {
-    app_data_dir(app)
+pub(crate) fn default_generated_content_dir(app: &tauri::AppHandle) -> Result<PathBuf, String> {
+    Ok(app_data_dir(app)?.join("generated-content"))
 }
 
-fn configured_generated_content_dir(
+pub(crate) fn default_thumbnail_dir(app: &tauri::AppHandle) -> Result<PathBuf, String> {
+    Ok(app_data_dir(app)?.join("thumbnails"))
+}
+
+pub(crate) fn configured_generated_content_dir(
     app: &tauri::AppHandle,
     conn: &Connection,
 ) -> Result<PathBuf, String> {
@@ -277,7 +167,93 @@ fn configured_generated_content_dir(
     Ok(PathBuf::from(stored))
 }
 
-fn open_db(app: &tauri::AppHandle) -> Result<Connection, String> {
+pub(crate) fn configured_thumbnail_dir(
+    app: &tauri::AppHandle,
+    conn: &Connection,
+) -> Result<PathBuf, String> {
+    let default_dir = default_thumbnail_dir(app)?;
+    let stored = read_config(conn, "thumbnail_dir", &default_dir.to_string_lossy())?;
+    Ok(PathBuf::from(stored))
+}
+
+pub(crate) fn thumbnail_enabled(conn: &Connection) -> Result<bool, String> {
+    Ok(read_config(conn, "thumbnail_enabled", "false")? == "true")
+}
+
+fn source_roots_from_conn(conn: &Connection) -> Result<Vec<PathBuf>, String> {
+    let mut stmt = conn
+        .prepare("SELECT path FROM source_paths ORDER BY path COLLATE NOCASE")
+        .map_err(|err| format!("Failed to read source paths: {err}"))?;
+    let roots = stmt
+        .query_map([], |row| row.get::<_, String>(0))
+        .map_err(|err| format!("Failed to query source paths: {err}"))?
+        .collect::<Result<Vec<_>, _>>()
+        .map_err(|err| format!("Failed to collect source paths: {err}"))?
+        .into_iter()
+        .map(PathBuf::from)
+        .collect();
+    Ok(roots)
+}
+
+fn collapse_asset_roots(mut roots: Vec<PathBuf>) -> Vec<PathBuf> {
+    roots.retain(|path| path.is_absolute());
+    roots.sort();
+    roots.dedup();
+    roots.into_iter().fold(Vec::new(), |mut kept, root| {
+        if !kept.iter().any(|parent: &PathBuf| root.starts_with(parent)) {
+            kept.push(root);
+        }
+        kept
+    })
+}
+
+fn allow_asset_directory(scope: &tauri::scope::fs::Scope, directory: &Path) -> Result<(), String> {
+    let directory = if directory.exists() {
+        let canonical = fs::canonicalize(directory).map_err(|err| {
+            format!(
+                "Failed to canonicalize asset directory {}: {err}",
+                directory.display()
+            )
+        })?;
+        if !canonical.is_dir() {
+            return Ok(());
+        }
+        canonical
+    } else {
+        directory.to_path_buf()
+    };
+
+    if !directory.is_absolute() {
+        return Ok(());
+    }
+
+    scope.allow_directory(&directory, true).map_err(|err| {
+        format!(
+            "Failed to allow asset directory {}: {err}",
+            directory.display()
+        )
+    })
+}
+
+fn refresh_asset_scope_with_conn(app: &tauri::AppHandle, conn: &Connection) -> Result<(), String> {
+    let mut roots = source_roots_from_conn(conn)?;
+    roots.push(app_data_dir(app)?);
+    roots.push(configured_generated_content_dir(app, conn)?);
+    roots.push(configured_thumbnail_dir(app, conn)?);
+
+    let scope = app.asset_protocol_scope();
+    for root in collapse_asset_roots(roots) {
+        allow_asset_directory(&scope, &root)?;
+    }
+    Ok(())
+}
+
+fn refresh_asset_scope(app: &tauri::AppHandle) -> Result<(), String> {
+    let conn = open_db(app)?;
+    refresh_asset_scope_with_conn(app, &conn)
+}
+
+pub(crate) fn open_db(app: &tauri::AppHandle) -> Result<Connection, String> {
     let conn =
         Connection::open(db_path(app)?).map_err(|err| format!("Failed to open database: {err}"))?;
     init_db(&conn)?;
@@ -305,10 +281,21 @@ fn init_db(conn: &Connection) -> Result<(), String> {
         );
 
         CREATE INDEX IF NOT EXISTS images_updated_at_idx ON images(updated_at DESC);
+        CREATE INDEX IF NOT EXISTS images_sort_idx ON images(modified DESC, path COLLATE NOCASE ASC);
 
         CREATE TABLE IF NOT EXISTS app_config (
             key TEXT PRIMARY KEY NOT NULL,
             value TEXT NOT NULL
+        );
+
+        CREATE TABLE IF NOT EXISTS image_thumbnails (
+            image_path TEXT PRIMARY KEY NOT NULL,
+            thumb_path TEXT NOT NULL,
+            source_modified INTEGER NOT NULL,
+            source_size INTEGER NOT NULL,
+            width INTEGER NOT NULL,
+            height INTEGER NOT NULL,
+            updated_at INTEGER NOT NULL
         );
         ",
     )
@@ -385,10 +372,24 @@ fn migrate_db(conn: &Connection) -> Result<(), String> {
         [],
     )
     .map_err(|err| format!("Failed to index media paths: {err}"))?;
+    conn.execute(
+        "CREATE INDEX IF NOT EXISTS images_sort_idx ON images(modified DESC, path COLLATE NOCASE ASC)",
+        [],
+    )
+    .map_err(|err| format!("Failed to index media sort order: {err}"))?;
+    conn.execute(
+        "CREATE INDEX IF NOT EXISTS image_thumbnails_updated_at_idx ON image_thumbnails(updated_at DESC)",
+        [],
+    )
+    .map_err(|err| format!("Failed to index thumbnails: {err}"))?;
     Ok(())
 }
 
-fn read_config(conn: &Connection, key: &str, default_value: &str) -> Result<String, String> {
+pub(crate) fn read_config(
+    conn: &Connection,
+    key: &str,
+    default_value: &str,
+) -> Result<String, String> {
     match conn.query_row(
         "SELECT value FROM app_config WHERE key = ?1",
         params![key],
@@ -400,7 +401,7 @@ fn read_config(conn: &Connection, key: &str, default_value: &str) -> Result<Stri
     }
 }
 
-fn write_config(conn: &Connection, key: &str, value: &str) -> Result<(), String> {
+pub(crate) fn write_config(conn: &Connection, key: &str, value: &str) -> Result<(), String> {
     conn.execute(
         "
         INSERT INTO app_config (key, value)
@@ -411,6 +412,71 @@ fn write_config(conn: &Connection, key: &str, value: &str) -> Result<(), String>
     )
     .map_err(|err| format!("Failed to write config {key}: {err}"))?;
     Ok(())
+}
+
+fn xai_encryption_key(app: &tauri::AppHandle) -> Result<[u8; 32], String> {
+    let mut hasher = Sha256::new();
+    hasher.update(b"gallery2:xai-key:v1");
+    hasher.update(app_data_dir(app)?.to_string_lossy().as_bytes());
+    hasher.update(env::var("USER").unwrap_or_default().as_bytes());
+    hasher.update(env::var("USERNAME").unwrap_or_default().as_bytes());
+    hasher.update(env::var("HOME").unwrap_or_default().as_bytes());
+    hasher.update(env::var("USERPROFILE").unwrap_or_default().as_bytes());
+    Ok(hasher.finalize().into())
+}
+
+fn encrypt_xai_key(app: &tauri::AppHandle, plaintext: &str) -> Result<String, String> {
+    let key = xai_encryption_key(app)?;
+    let cipher = Aes256Gcm::new(&key.into());
+    let nonce = Aes256Gcm::generate_nonce(&mut OsRng);
+    let ciphertext = cipher
+        .encrypt(&nonce, plaintext.as_bytes())
+        .map_err(|_| "Failed to encrypt xAI key".to_string())?;
+    Ok(format!(
+        "{ENCRYPTED_XAI_KEY_PREFIX}{}:{}",
+        base64_encode(&nonce),
+        base64_encode(&ciphertext)
+    ))
+}
+
+fn decrypt_xai_key(app: &tauri::AppHandle, stored: &str) -> Result<String, String> {
+    let Some(payload) = stored.strip_prefix(ENCRYPTED_XAI_KEY_PREFIX) else {
+        return Ok(stored.to_string());
+    };
+    let (nonce, ciphertext) = payload
+        .split_once(':')
+        .ok_or_else(|| "Invalid encrypted xAI key".to_string())?;
+    let nonce = base64_decode(nonce)?;
+    let ciphertext = base64_decode(ciphertext)?;
+    let key = xai_encryption_key(app)?;
+    let cipher = Aes256Gcm::new(&key.into());
+    let plaintext = cipher
+        .decrypt(nonce.as_slice().into(), ciphertext.as_slice())
+        .map_err(|_| "Failed to decrypt xAI key".to_string())?;
+    String::from_utf8(plaintext).map_err(|_| "Invalid decrypted xAI key".to_string())
+}
+
+fn read_xai_key_config(app: &tauri::AppHandle, conn: &Connection) -> Result<String, String> {
+    let stored = read_config(conn, "xai_key", "")?;
+    if stored.is_empty() {
+        Ok(stored)
+    } else {
+        decrypt_xai_key(app, &stored)
+    }
+}
+
+fn write_xai_key_config(
+    app: &tauri::AppHandle,
+    conn: &Connection,
+    xai_key: &str,
+) -> Result<(), String> {
+    let xai_key = xai_key.trim();
+    let stored = if xai_key.is_empty() {
+        String::new()
+    } else {
+        encrypt_xai_key(app, xai_key)?
+    };
+    write_config(conn, "xai_key", &stored)
 }
 
 fn normalize_gallery_preferences(has_gap: bool, theme: String) -> GalleryPreferences {
@@ -486,6 +552,13 @@ fn now_secs() -> i64 {
     UNIX_EPOCH
         .elapsed()
         .map(|duration| duration.as_secs() as i64)
+        .unwrap_or(0)
+}
+
+pub(crate) fn now_nanos() -> i64 {
+    UNIX_EPOCH
+        .elapsed()
+        .map(|duration| i64::try_from(duration.as_nanos()).unwrap_or(i64::MAX))
         .unwrap_or(0)
 }
 
@@ -763,7 +836,7 @@ fn video_dimensions(path: &Path) -> Result<(u32, u32), String> {
         .ok_or_else(|| format!("Failed to read video dimensions for {}", path.display()))
 }
 
-fn is_supported_image(path: &Path) -> bool {
+pub(crate) fn is_supported_image(path: &Path) -> bool {
     path.extension()
         .and_then(|ext| ext.to_str())
         .map(|ext| {
@@ -775,7 +848,7 @@ fn is_supported_image(path: &Path) -> bool {
         .unwrap_or(false)
 }
 
-fn image_format(path: &Path) -> Option<ImageFormat> {
+pub(crate) fn image_format(path: &Path) -> Option<ImageFormat> {
     ImageReader::open(path)
         .ok()?
         .with_guessed_format()
@@ -783,7 +856,7 @@ fn image_format(path: &Path) -> Option<ImageFormat> {
         .format()
 }
 
-fn image_format_extension(format: ImageFormat) -> Option<&'static str> {
+pub(crate) fn image_format_extension(format: ImageFormat) -> Option<&'static str> {
     match format {
         ImageFormat::Jpeg => Some("jpeg"),
         ImageFormat::Png => Some("png"),
@@ -854,6 +927,73 @@ fn base64_decode(input: &str) -> Result<Vec<u8>, String> {
     Ok(decoded)
 }
 
+pub(crate) fn hex_encode(data: &[u8]) -> String {
+    const TABLE: &[u8; 16] = b"0123456789abcdef";
+    let mut encoded = String::with_capacity(data.len() * 2);
+    for byte in data {
+        encoded.push(TABLE[(byte >> 4) as usize] as char);
+        encoded.push(TABLE[(byte & 0x0f) as usize] as char);
+    }
+    encoded
+}
+
+pub(crate) fn thumbnail_cache_key(path: &str, modified: i64, size: i64) -> String {
+    let mut hasher = Sha256::new();
+    hasher.update(path.as_bytes());
+    hasher.update(modified.to_le_bytes());
+    hasher.update(size.to_le_bytes());
+    hex_encode(&hasher.finalize())
+}
+
+pub(crate) fn write_image_thumbnail(
+    source: &Path,
+    destination: &Path,
+) -> Result<(u32, u32), String> {
+    let image = ImageReader::open(source)
+        .map_err(|err| {
+            format!(
+                "Failed to open thumbnail source {}: {err}",
+                source.display()
+            )
+        })?
+        .with_guessed_format()
+        .map_err(|err| {
+            format!(
+                "Failed to detect thumbnail source {}: {err}",
+                source.display()
+            )
+        })?
+        .decode()
+        .map_err(|err| {
+            format!(
+                "Failed to decode thumbnail source {}: {err}",
+                source.display()
+            )
+        })?;
+    let thumbnail = image.thumbnail(THUMBNAIL_MAX_EDGE, THUMBNAIL_MAX_EDGE);
+    let rgb = thumbnail.to_rgb8();
+    let (width, height) = rgb.dimensions();
+    if let Some(parent) = destination.parent() {
+        fs::create_dir_all(parent).map_err(|err| {
+            format!(
+                "Failed to create thumbnail directory {}: {err}",
+                parent.display()
+            )
+        })?;
+    }
+    let file = fs::File::create(destination).map_err(|err| {
+        format!(
+            "Failed to create thumbnail {}: {err}",
+            destination.display()
+        )
+    })?;
+    let mut encoder = JpegEncoder::new_with_quality(file, THUMBNAIL_QUALITY);
+    encoder
+        .encode(&rgb, width, height, image::ColorType::Rgb8.into())
+        .map_err(|err| format!("Failed to write thumbnail {}: {err}", destination.display()))?;
+    Ok((width, height))
+}
+
 fn data_uri_parts(data_uri: &str) -> Result<(&str, &str), String> {
     let Some((header, data)) = data_uri.split_once(',') else {
         return Err("Invalid data URI".to_string());
@@ -879,7 +1019,8 @@ fn mime_extension(mime_type: &str) -> &'static str {
 
 fn first_json_string(value: &serde_json::Value, pointers: &[&str]) -> Option<String> {
     pointers.iter().find_map(|pointer| {
-        value.pointer(pointer)
+        value
+            .pointer(pointer)
             .and_then(|entry| entry.as_str())
             .map(str::trim)
             .filter(|entry| !entry.is_empty())
@@ -1048,6 +1189,7 @@ fn save_generated_image_bytes(
     let dir = configured_generated_content_dir(app, &conn)?;
     fs::create_dir_all(&dir)
         .map_err(|err| format!("Failed to create generated content directory: {err}"))?;
+    allow_asset_directory(&app.asset_protocol_scope(), &dir)?;
     let source_stem = Path::new(source_path)
         .file_stem()
         .and_then(|name| name.to_str())
@@ -1082,7 +1224,7 @@ async fn save_generated_image_source(
     save_generated_image_bytes(app, &bytes, extension, source_path)
 }
 
-fn image_extension_matches(format: ImageFormat, extension: &str) -> bool {
+pub(crate) fn image_extension_matches(format: ImageFormat, extension: &str) -> bool {
     let extension = extension.to_ascii_lowercase();
     match format {
         ImageFormat::Jpeg => matches!(extension.as_str(), "jpg" | "jpeg"),
@@ -1117,7 +1259,7 @@ fn supported_media_type(path: &Path) -> Option<&'static str> {
     }
 }
 
-fn walk_media(root: &Path, media: &mut Vec<PathBuf>, skipped: &mut usize) {
+pub(crate) fn visit_media(root: &Path, skipped: &mut usize, on_media: &mut impl FnMut(PathBuf)) {
     let Ok(entries) = fs::read_dir(root) else {
         *skipped += 1;
         return;
@@ -1126,18 +1268,22 @@ fn walk_media(root: &Path, media: &mut Vec<PathBuf>, skipped: &mut usize) {
     for entry in entries.flatten() {
         let path = entry.path();
         if path.is_dir() {
-            walk_media(&path, media, skipped);
+            visit_media(&path, skipped, on_media);
         } else if path.is_file() && supported_media_type(&path).is_some() {
-            media.push(path);
+            on_media(path);
         }
     }
 }
 
-fn media_size(path: &Path) -> Option<u64> {
+pub(crate) fn walk_media(root: &Path, media: &mut Vec<PathBuf>, skipped: &mut usize) {
+    visit_media(root, skipped, &mut |path| media.push(path));
+}
+
+pub(crate) fn media_size(path: &Path) -> Option<u64> {
     fs::metadata(path).ok().map(|metadata| metadata.len())
 }
 
-fn content_hash(path: &Path) -> Result<u64, String> {
+pub(crate) fn content_hash(path: &Path) -> Result<u64, String> {
     let mut file =
         fs::File::open(path).map_err(|err| format!("Failed to open {}: {err}", path.display()))?;
     let mut hash = 0xcbf29ce484222325u64;
@@ -1157,7 +1303,7 @@ fn content_hash(path: &Path) -> Result<u64, String> {
     Ok(hash)
 }
 
-fn files_equal(left: &Path, right: &Path) -> Result<bool, String> {
+pub(crate) fn files_equal(left: &Path, right: &Path) -> Result<bool, String> {
     if media_size(left) != media_size(right) {
         return Ok(false);
     }
@@ -1186,11 +1332,11 @@ fn files_equal(left: &Path, right: &Path) -> Result<bool, String> {
     }
 }
 
-fn paths_overlap(left: &Path, right: &Path) -> bool {
+pub(crate) fn paths_overlap(left: &Path, right: &Path) -> bool {
     left.starts_with(right) || right.starts_with(left)
 }
 
-fn unique_destination_path(destination_dir: &Path, source: &Path) -> PathBuf {
+pub(crate) fn unique_destination_path(destination_dir: &Path, source: &Path) -> PathBuf {
     let file_name = source
         .file_name()
         .and_then(|name| name.to_str())
@@ -1214,7 +1360,7 @@ fn unique_destination_path(destination_dir: &Path, source: &Path) -> PathBuf {
     candidate
 }
 
-fn move_file(source: &Path, target: &Path) -> Result<(), String> {
+pub(crate) fn move_file(source: &Path, target: &Path) -> Result<(), String> {
     match fs::rename(source, target) {
         Ok(()) => Ok(()),
         Err(rename_err) => {
@@ -1238,7 +1384,7 @@ fn move_file(source: &Path, target: &Path) -> Result<(), String> {
     }
 }
 
-fn normalize_path(path: &str) -> Option<PathBuf> {
+pub(crate) fn normalize_path(path: &str) -> Option<PathBuf> {
     let trimmed = path.trim();
     if trimmed.is_empty() {
         return None;
@@ -1246,7 +1392,7 @@ fn normalize_path(path: &str) -> Option<PathBuf> {
     fs::canonicalize(trimmed).ok()
 }
 
-fn collect_roots(paths: &[String]) -> Vec<PathBuf> {
+pub(crate) fn collect_roots(paths: &[String]) -> Vec<PathBuf> {
     let mut roots = paths
         .iter()
         .filter_map(|path| normalize_path(path))
@@ -1286,21 +1432,55 @@ fn replace_source_paths(conn: &mut Connection, roots: &[PathBuf]) -> Result<Vec<
     Ok(stored_paths)
 }
 
-fn upsert_image(conn: &Connection, media_path: &Path, updated_at: i64) -> Result<(), String> {
-    let media_type = supported_media_type(media_path)
-        .ok_or_else(|| format!("Unsupported media type for {}", media_path.display()))?;
-    let (width, height) = if media_type == "image" {
-        image::image_dimensions(media_path).map_err(|err| {
-            format!(
-                "Failed to read image dimensions for {}: {err}",
-                media_path.display()
-            )
-        })?
-    } else {
-        video_dimensions(media_path)?
-    };
-    let (modified, size) = metadata_secs(media_path)?;
+#[derive(Clone)]
+pub(crate) struct ExistingMediaRecord {
+    media_type: String,
+    modified: i64,
+    size: i64,
+}
 
+struct MediaMetadata {
+    media_type: String,
+    width: u32,
+    height: u32,
+    modified: i64,
+    size: i64,
+}
+
+pub(crate) fn load_existing_media_records(
+    conn: &Connection,
+) -> Result<HashMap<String, ExistingMediaRecord>, String> {
+    let mut stmt = conn
+        .prepare("SELECT path, media_type, modified, size FROM images")
+        .map_err(|err| format!("Failed to prepare existing media query: {err}"))?;
+    let rows = stmt
+        .query_map([], |row| {
+            Ok((
+                row.get::<_, String>(0)?,
+                ExistingMediaRecord {
+                    media_type: row.get(1)?,
+                    modified: row.get(2)?,
+                    size: row.get(3)?,
+                },
+            ))
+        })
+        .map_err(|err| format!("Failed to query existing media records: {err}"))?;
+
+    let mut records = HashMap::new();
+    for row in rows {
+        let (path, record) =
+            row.map_err(|err| format!("Failed to read existing media record: {err}"))?;
+        records.insert(path, record);
+    }
+    Ok(records)
+}
+
+fn upsert_image_with_metadata(
+    conn: &Connection,
+    media_path: &Path,
+    metadata: &MediaMetadata,
+    updated_at: i64,
+) -> Result<(), String> {
     conn.execute(
         "
         INSERT INTO images (path, media_type, width, height, modified, size, updated_at)
@@ -1315,17 +1495,103 @@ fn upsert_image(conn: &Connection, media_path: &Path, updated_at: i64) -> Result
         ",
         params![
             media_path.to_string_lossy(),
-            media_type,
-            width,
-            height,
-            modified,
-            size,
+            metadata.media_type.as_str(),
+            metadata.width,
+            metadata.height,
+            metadata.modified,
+            metadata.size,
             updated_at
         ],
     )
     .map_err(|err| format!("Failed to write image record: {err}"))?;
 
     Ok(())
+}
+
+fn touch_image(conn: &Connection, path: &str, updated_at: i64) -> Result<(), String> {
+    conn.execute(
+        "UPDATE images SET updated_at = ?1 WHERE path = ?2",
+        params![updated_at, path],
+    )
+    .map_err(|err| format!("Failed to touch image record: {err}"))?;
+    Ok(())
+}
+
+pub(crate) fn upsert_image_incremental(
+    conn: &Connection,
+    existing_records: &HashMap<String, ExistingMediaRecord>,
+    media_path: &Path,
+    updated_at: i64,
+) -> Result<(), String> {
+    let media_type = supported_media_type(media_path)
+        .ok_or_else(|| format!("Unsupported media type for {}", media_path.display()))?;
+    let (modified, size) = metadata_secs(media_path)?;
+    let path = media_path.to_string_lossy().into_owned();
+    if let Some(existing) = existing_records.get(&path) {
+        if existing.media_type == media_type
+            && existing.modified == modified
+            && existing.size == size
+        {
+            return touch_image(conn, &path, updated_at);
+        }
+    }
+
+    let (width, height) = if media_type == "image" {
+        image::image_dimensions(media_path).map_err(|err| {
+            format!(
+                "Failed to read image dimensions for {}: {err}",
+                media_path.display()
+            )
+        })?
+    } else {
+        video_dimensions(media_path)?
+    };
+
+    upsert_image_with_metadata(
+        conn,
+        media_path,
+        &MediaMetadata {
+            media_type: media_type.to_string(),
+            width,
+            height,
+            modified,
+            size,
+        },
+        updated_at,
+    )
+}
+
+pub(crate) fn upsert_image(
+    conn: &Connection,
+    media_path: &Path,
+    updated_at: i64,
+) -> Result<(), String> {
+    let media_type = supported_media_type(media_path)
+        .ok_or_else(|| format!("Unsupported media type for {}", media_path.display()))?;
+    let (width, height) = if media_type == "image" {
+        image::image_dimensions(media_path).map_err(|err| {
+            format!(
+                "Failed to read image dimensions for {}: {err}",
+                media_path.display()
+            )
+        })?
+    } else {
+        video_dimensions(media_path)?
+    };
+    let (modified, size) = metadata_secs(media_path)?;
+
+    upsert_image_with_metadata(
+        conn,
+        media_path,
+        &MediaMetadata {
+            media_type: media_type.to_string(),
+            width,
+            height,
+            modified,
+            size,
+        },
+        updated_at,
+    )
 }
 
 fn show_window(app: &tauri::AppHandle, label: &str) -> Result<(), String> {
@@ -1335,6 +1601,7 @@ fn show_window(app: &tauri::AppHandle, label: &str) -> Result<(), String> {
             configure_gallery_window_for_fullscreen(&window)?;
         }
         if label == GALLERY_LABEL {
+            refresh_asset_scope(app)?;
             let preferences = get_gallery_preferences_from_app(app)?;
             apply_gallery_window_preferences(&window, &preferences)?;
         }
@@ -1349,6 +1616,7 @@ fn show_window(app: &tauri::AppHandle, label: &str) -> Result<(), String> {
     };
 
     let background_color = if label == GALLERY_LABEL {
+        refresh_asset_scope(app)?;
         gallery_background_color(&get_gallery_preferences_from_app(app)?)
     } else {
         Color(246, 246, 244, 255)
@@ -1470,7 +1738,11 @@ fn get_settings(app: tauri::AppHandle) -> Result<SettingsState, String> {
         generated_content_dir: configured_generated_content_dir(&app, &conn)?
             .to_string_lossy()
             .into_owned(),
-        xai_key: read_config(&conn, "xai_key", "")?,
+        thumbnail_enabled: thumbnail_enabled(&conn)?,
+        thumbnail_dir: configured_thumbnail_dir(&app, &conn)?
+            .to_string_lossy()
+            .into_owned(),
+        xai_key: read_xai_key_config(&app, &conn)?,
         gallery_mode: normalize_gallery_mode(read_config(&conn, "gallery_mode", "")?, &preferences),
         gallery_has_gap: preferences.has_gap,
         gallery_theme: preferences.theme,
@@ -1525,7 +1797,9 @@ fn save_gallery_preferences(
 fn save_source_paths(app: tauri::AppHandle, paths: Vec<String>) -> Result<Vec<String>, String> {
     let roots = collect_roots(&paths);
     let mut conn = open_db(&app)?;
-    replace_source_paths(&mut conn, &roots)
+    let stored_paths = replace_source_paths(&mut conn, &roots)?;
+    refresh_asset_scope_with_conn(&app, &conn)?;
+    Ok(stored_paths)
 }
 
 #[tauri::command]
@@ -1542,9 +1816,60 @@ fn save_xai_settings(
     };
     fs::create_dir_all(&dir)
         .map_err(|err| format!("Failed to create generated content directory: {err}"))?;
-    write_config(&conn, "xai_key", xai_key.trim())?;
+    let dir = fs::canonicalize(&dir)
+        .map_err(|err| format!("Failed to canonicalize generated content directory: {err}"))?;
+    write_xai_key_config(&app, &conn, &xai_key)?;
     write_config(&conn, "generated_content_dir", &dir.to_string_lossy())?;
+    refresh_asset_scope_with_conn(&app, &conn)?;
     Ok(())
+}
+
+#[tauri::command]
+fn save_thumbnail_settings(
+    app: tauri::AppHandle,
+    thumbnail_enabled: bool,
+    thumbnail_dir: String,
+) -> Result<(), String> {
+    let conn = open_db(&app)?;
+    let dir = if thumbnail_dir.trim().is_empty() {
+        default_thumbnail_dir(&app)?
+    } else {
+        PathBuf::from(thumbnail_dir.trim())
+    };
+    fs::create_dir_all(&dir)
+        .map_err(|err| format!("Failed to create thumbnail directory: {err}"))?;
+    let dir = fs::canonicalize(&dir)
+        .map_err(|err| format!("Failed to canonicalize thumbnail directory: {err}"))?;
+    write_config(
+        &conn,
+        "thumbnail_enabled",
+        if thumbnail_enabled { "true" } else { "false" },
+    )?;
+    write_config(&conn, "thumbnail_dir", &dir.to_string_lossy())?;
+    refresh_asset_scope_with_conn(&app, &conn)?;
+    Ok(())
+}
+
+#[tauri::command]
+fn start_thumbnail_scan(app: tauri::AppHandle, paths: Vec<String>) -> Result<(), String> {
+    let progress = app.state::<ThumbnailProgressState>().inner().clone();
+    let already_running = progress.lock().map(|state| state.running).unwrap_or(false);
+    if already_running {
+        return Err("缩略图任务正在运行".to_string());
+    }
+
+    tauri::async_runtime::spawn_blocking(move || {
+        scanner::scan_library_and_generate_thumbnails(app, paths, progress);
+    });
+    Ok(())
+}
+
+#[tauri::command]
+fn get_thumbnail_progress(app: tauri::AppHandle) -> Result<ThumbnailProgress, String> {
+    app.state::<ThumbnailProgressState>()
+        .lock()
+        .map(|state| state.clone())
+        .map_err(|_| "Failed to read thumbnail progress".to_string())
 }
 
 #[tauri::command]
@@ -1599,6 +1924,22 @@ async fn pick_generated_content_folder(app: tauri::AppHandle) -> Result<Option<S
 }
 
 #[tauri::command]
+async fn pick_thumbnail_folder(app: tauri::AppHandle) -> Result<Option<String>, String> {
+    let folder =
+        tauri::async_runtime::spawn_blocking(move || app.dialog().file().blocking_pick_folder())
+            .await
+            .map_err(|err| format!("Failed to open folder picker: {err}"))?;
+
+    folder
+        .map(|path| {
+            path.into_path()
+                .map(|path| path.to_string_lossy().into_owned())
+                .map_err(|err| format!("Failed to resolve thumbnail folder: {err}"))
+        })
+        .transpose()
+}
+
+#[tauri::command]
 async fn pick_xai_reference_images(app: tauri::AppHandle) -> Result<Vec<PickedImage>, String> {
     let files =
         tauri::async_runtime::spawn_blocking(move || app.dialog().file().blocking_pick_files())
@@ -1623,47 +1964,7 @@ async fn pick_xai_reference_images(app: tauri::AppHandle) -> Result<Vec<PickedIm
 
 #[tauri::command]
 fn scan_library(app: tauri::AppHandle, paths: Vec<String>) -> Result<ScanSummary, String> {
-    let roots = collect_roots(&paths);
-
-    let mut conn = open_db(&app)?;
-    let updated_at = now_secs();
-    let tx = conn
-        .transaction()
-        .map_err(|err| format!("Failed to start scan transaction: {err}"))?;
-
-    let mut indexed = 0;
-    let mut skipped = 0;
-    for root in &roots {
-        let mut media = Vec::new();
-        walk_media(root, &mut media, &mut skipped);
-        for media_path in media {
-            match upsert_image(&tx, &media_path, updated_at) {
-                Ok(()) => indexed += 1,
-                Err(_) => skipped += 1,
-            }
-        }
-    }
-
-    let removed = tx
-        .execute(
-            "DELETE FROM images WHERE updated_at != ?1",
-            params![updated_at],
-        )
-        .map_err(|err| format!("Failed to remove stale images: {err}"))?;
-    let total = tx
-        .query_row("SELECT COUNT(*) FROM images", [], |row| {
-            row.get::<_, i64>(0)
-        })
-        .map_err(|err| format!("Failed to count images: {err}"))?;
-    tx.commit()
-        .map_err(|err| format!("Failed to finish scan: {err}"))?;
-
-    Ok(ScanSummary {
-        indexed,
-        skipped,
-        removed,
-        total,
-    })
+    scanner::scan_library(app, paths)
 }
 
 #[tauri::command]
@@ -1672,97 +1973,7 @@ fn deduplicate_resources(
     paths: Vec<String>,
     destination_path: String,
 ) -> Result<DedupeSummary, String> {
-    let roots = collect_roots(&paths);
-    let destination = normalize_path(&destination_path)
-        .filter(|path| path.is_dir())
-        .ok_or_else(|| "Invalid duplicate destination".to_string())?;
-
-    if roots.iter().any(|root| paths_overlap(root, &destination)) {
-        return Err("重复项目录不能与资源路径重叠".to_string());
-    }
-
-    let mut skipped = 0usize;
-    let mut media = Vec::new();
-    for root in &roots {
-        walk_media(root, &mut media, &mut skipped);
-    }
-
-    let mut by_size: HashMap<u64, Vec<PathBuf>> = HashMap::new();
-    let mut checked = 0usize;
-    for path in media {
-        let Some(size) = media_size(&path) else {
-            skipped += 1;
-            continue;
-        };
-        if size == 0 || size > DEDUPE_MAX_FILE_SIZE {
-            skipped += 1;
-            continue;
-        }
-        checked += 1;
-        by_size.entry(size).or_default().push(path);
-    }
-
-    let mut by_hash: HashMap<(u64, u64), Vec<PathBuf>> = HashMap::new();
-    for (size, paths) in by_size {
-        if paths.len() < 2 {
-            continue;
-        }
-        for path in paths {
-            match content_hash(&path) {
-                Ok(hash) => {
-                    by_hash.entry((size, hash)).or_default().push(path);
-                }
-                Err(_) => skipped += 1,
-            }
-        }
-    }
-
-    let conn = open_db(&app)?;
-    let mut duplicates = 0usize;
-    let mut moved = 0usize;
-    for (_, mut paths) in by_hash {
-        if paths.len() < 2 {
-            continue;
-        }
-        paths.sort();
-        let keeper = paths[0].clone();
-        for source in paths.into_iter().skip(1) {
-            match files_equal(&keeper, &source) {
-                Ok(true) => duplicates += 1,
-                Ok(false) => continue,
-                Err(_) => {
-                    skipped += 1;
-                    continue;
-                }
-            }
-            let target = unique_destination_path(&destination, &source);
-            if move_file(&source, &target).is_err() {
-                skipped += 1;
-                continue;
-            }
-            conn.execute(
-                "DELETE FROM images WHERE path = ?1",
-                params![source.to_string_lossy()],
-            )
-            .map_err(|err| format!("Failed to remove moved duplicate from database: {err}"))?;
-            moved += 1;
-        }
-    }
-
-    let total = conn
-        .query_row("SELECT COUNT(*) FROM images", [], |row| {
-            row.get::<_, i64>(0)
-        })
-        .map_err(|err| format!("Failed to count images: {err}"))?;
-
-    Ok(DedupeSummary {
-        checked,
-        duplicates,
-        moved,
-        skipped,
-        total,
-        max_file_size: DEDUPE_MAX_FILE_SIZE,
-    })
+    scanner::deduplicate_resources(app, paths, destination_path)
 }
 
 #[tauri::command]
@@ -1770,67 +1981,7 @@ fn repair_image_extensions(
     app: tauri::AppHandle,
     paths: Vec<String>,
 ) -> Result<ExtensionRepairSummary, String> {
-    let roots = collect_roots(&paths);
-    let mut media = Vec::new();
-    let mut skipped = 0usize;
-    for root in &roots {
-        walk_media(root, &mut media, &mut skipped);
-    }
-
-    let conn = open_db(&app)?;
-    let updated_at = now_secs();
-    let mut repaired = 0usize;
-    for source in media.into_iter().filter(|path| is_supported_image(path)) {
-        let Some(format) = image_format(&source) else {
-            skipped += 1;
-            continue;
-        };
-        let Some(expected_extension) = image_format_extension(format) else {
-            skipped += 1;
-            continue;
-        };
-        let extension = source
-            .extension()
-            .and_then(|extension| extension.to_str())
-            .unwrap_or("");
-        if image_extension_matches(format, extension) {
-            continue;
-        }
-        let target = unique_destination_path(
-            source.parent().unwrap_or_else(|| Path::new(".")),
-            &source.with_extension(expected_extension),
-        );
-        if fs::rename(&source, &target).is_err() {
-            skipped += 1;
-            continue;
-        }
-        conn.execute(
-            "DELETE FROM images WHERE path = ?1",
-            params![source.to_string_lossy()],
-        )
-        .map_err(|err| format!("Failed to update repaired image record: {err}"))?;
-        if upsert_image(&conn, &target, updated_at).is_err() {
-            skipped += 1;
-            continue;
-        }
-        repaired += 1;
-    }
-
-    let total = conn
-        .query_row("SELECT COUNT(*) FROM images", [], |row| {
-            row.get::<_, i64>(0)
-        })
-        .map_err(|err| format!("Failed to count images: {err}"))?;
-
-    if let Some(window) = app.get_webview_window(GALLERY_LABEL) {
-        let _ = window.eval("window.location.reload()");
-    }
-
-    Ok(ExtensionRepairSummary {
-        repaired,
-        skipped,
-        total,
-    })
+    scanner::repair_image_extensions(app, paths)
 }
 
 #[tauri::command]
@@ -1855,6 +2006,7 @@ fn save_generated_image(
     let dir = configured_generated_content_dir(&app, &conn)?;
     fs::create_dir_all(&dir)
         .map_err(|err| format!("Failed to create generated content directory: {err}"))?;
+    allow_asset_directory(&app.asset_protocol_scope(), &dir)?;
     let source_stem = Path::new(&source_path)
         .file_stem()
         .and_then(|name| name.to_str())
@@ -1910,7 +2062,7 @@ async fn edit_image_with_xai(
     }
 
     let conn = open_db(&app)?;
-    let xai_key = read_config(&conn, "xai_key", "")?;
+    let xai_key = read_xai_key_config(&app, &conn)?;
     if xai_key.trim().is_empty() {
         return Err("xAI Key 未设置".to_string());
     }
@@ -2136,46 +2288,26 @@ fn save_editor_session(
 }
 
 #[tauri::command]
-fn list_images(app: tauri::AppHandle, offset: i64, limit: i64) -> Result<Vec<ImageRecord>, String> {
-    let conn = open_db(&app)?;
-    let limit = limit.clamp(1, 120);
-    let offset = offset.max(0);
-    let mut stmt = conn
-        .prepare(
-            "
-            SELECT path, media_type, width, height, modified, size
-            FROM images
-            ORDER BY modified DESC, path COLLATE NOCASE
-            LIMIT ?1 OFFSET ?2
-            ",
-        )
-        .map_err(|err| format!("Failed to prepare image query: {err}"))?;
-
-    let records = stmt
-        .query_map(params![limit, offset], |row| {
-            Ok(ImageRecord {
-                path: row.get(0)?,
-                media_type: row.get(1)?,
-                width: row.get(2)?,
-                height: row.get(3)?,
-                modified: row.get(4)?,
-                size: row.get(5)?,
-            })
-        })
-        .map_err(|err| format!("Failed to query images: {err}"))?
-        .collect::<Result<Vec<_>, _>>()
-        .map_err(|err| format!("Failed to collect images: {err}"))?;
-    Ok(records)
+fn list_images(
+    app: tauri::AppHandle,
+    cursor: Option<ImageCursor>,
+    limit: i64,
+) -> Result<ImagePage, String> {
+    gallery::list_images(app, cursor, limit)
 }
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     tauri::Builder::default()
+        .manage(Arc::new(Mutex::new(initial_thumbnail_progress())) as ThumbnailProgressState)
         .plugin(tauri_plugin_dialog::init())
-        .plugin(tauri_plugin_opener::init())
         .setup(|app| {
             #[cfg(target_os = "macos")]
             app.set_activation_policy(tauri::ActivationPolicy::Accessory);
+
+            if let Err(err) = refresh_asset_scope(&app.handle().clone()) {
+                eprintln!("Failed to refresh asset scope: {err}");
+            }
 
             let settings = MenuItem::with_id(app, SETTINGS_MENU_ID, "设置", true, None::<&str>)?;
             let gallery =
@@ -2212,9 +2344,13 @@ pub fn run() {
             save_gallery_preferences,
             save_source_paths,
             save_xai_settings,
+            save_thumbnail_settings,
+            start_thumbnail_scan,
+            get_thumbnail_progress,
             pick_source_folders,
             pick_duplicate_folder,
             pick_generated_content_folder,
+            pick_thumbnail_folder,
             pick_xai_reference_images,
             scan_library,
             deduplicate_resources,

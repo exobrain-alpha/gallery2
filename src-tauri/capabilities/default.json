@@ -4,7 +4,6 @@
   "description": "Capability for gallery windows",
   "windows": ["settings", "gallery"],
   "permissions": [
-    "core:default",
-    "opener:default"
+    "core:default"
   ]
 }

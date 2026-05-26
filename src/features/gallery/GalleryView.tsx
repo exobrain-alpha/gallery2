@@ -2,7 +2,14 @@ import { convertFileSrc, invoke } from "@tauri-apps/api/core";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { EditorDrawer, type EditorDrawerHandle } from "../editor/EditorDrawer";
 import { Icons } from "../../icons";
-import type { GalleryPreferences, ImageRecord, PickedImage, XaiEditResult } from "../../types";
+import type {
+  GalleryPreferences,
+  ImageCursor,
+  ImagePage,
+  ImageRecord,
+  PickedImage,
+  XaiEditResult,
+} from "../../types";
 import { classNames, logError, mediaName, setPageBackground } from "../../utils";
 
 const PAGE_SIZE = 50;
@@ -54,6 +61,7 @@ export function GalleryView() {
   const loadingRef = useRef(false);
   const doneRef = useRef(false);
   const recordsRef = useRef<ImageRecord[]>([]);
+  const cursorRef = useRef<ImageCursor | null>(null);
   const selectedReferenceRecordsRef = useRef<ImageRecord[]>([]);
   const playingVideosRef = useRef<Map<string, HTMLVideoElement>>(new Map());
 
@@ -182,16 +190,18 @@ export function GalleryView() {
     if (loadingRef.current || doneRef.current) return;
     loadingRef.current = true;
     try {
-      const items = await invoke<ImageRecord[]>("list_images", {
-        offset: recordsRef.current.length,
+      const page = await invoke<ImagePage>("list_images", {
+        cursor: cursorRef.current,
         limit: PAGE_SIZE,
       });
+      const items = page.items;
       setRecords((current) => {
         const next = [...current, ...items];
         recordsRef.current = next;
         return next;
       });
-      const nextDone = items.length < PAGE_SIZE;
+      cursorRef.current = page.nextCursor;
+      const nextDone = !page.nextCursor;
       doneRef.current = nextDone;
       setDone(nextDone);
     } finally {
@@ -336,7 +346,7 @@ export function GalleryView() {
                   onRemove={pauseTileVideo}
                 />
               ) : (
-                <img loading="lazy" decoding="async" draggable={false} src={convertFileSrc(record.path)} alt={mediaName(record.path)} />
+                <img loading="lazy" decoding="async" draggable={false} src={convertFileSrc(record.displayPath || record.path)} alt={mediaName(record.path)} />
               )}
               {selected ? (
                 <span className="image-tile-badge image-tile-selection-mark">
@@ -448,6 +458,7 @@ function PreviewOverlay({ preview, onClose }: { preview: PreviewState; onClose: 
           controls
           autoPlay
           loop
+          draggable={false}
           src={preview.src}
           style={{
             ["--video-ratio" as string]: String(preview.width / preview.height),

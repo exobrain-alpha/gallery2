@@ -104,6 +104,7 @@ export const EditorDrawer = forwardRef<EditorDrawerHandle, EditorDrawerProps>(fu
   const inputRef = useRef<HTMLTextAreaElement | null>(null);
   const messagesRef = useRef<HTMLDivElement | null>(null);
   const closeTimerRef = useRef<number>(0);
+  const focusTimerRef = useRef<number>(0);
   const saveTimerRef = useRef<number>(0);
   const sessionTokenRef = useRef(0);
   const messagesStateRef = useRef<Message[]>([]);
@@ -126,7 +127,7 @@ export const EditorDrawer = forwardRef<EditorDrawerHandle, EditorDrawerProps>(fu
   }, [messages, sessionId, sessionLoaded]);
 
   useEffect(() => {
-    if (open && !pending) inputRef.current?.focus();
+    if (open && !pending) focusComposer();
   }, [open, pending]);
 
   useEffect(() => {
@@ -136,6 +137,7 @@ export const EditorDrawer = forwardRef<EditorDrawerHandle, EditorDrawerProps>(fu
   useEffect(() => {
     return () => {
       if (closeTimerRef.current) window.clearTimeout(closeTimerRef.current);
+      if (focusTimerRef.current) window.clearTimeout(focusTimerRef.current);
       if (saveTimerRef.current) window.clearTimeout(saveTimerRef.current);
     };
   }, []);
@@ -175,6 +177,7 @@ export const EditorDrawer = forwardRef<EditorDrawerHandle, EditorDrawerProps>(fu
     window.requestAnimationFrame(() => {
       setOpen(true);
       onToggle(true);
+      focusComposer();
     });
   }
 
@@ -204,6 +207,16 @@ export const EditorDrawer = forwardRef<EditorDrawerHandle, EditorDrawerProps>(fu
   function nextSessionToken() {
     sessionTokenRef.current += 1;
     return sessionTokenRef.current;
+  }
+
+  function focusComposer() {
+    if (focusTimerRef.current) window.clearTimeout(focusTimerRef.current);
+    focusTimerRef.current = window.setTimeout(() => {
+      const input = inputRef.current;
+      if (!input || input.disabled) return;
+      input.focus({ preventScroll: true });
+      input.setSelectionRange(input.value.length, input.value.length);
+    }, 0);
   }
 
   function applyAspectToggle(key: string | undefined) {
@@ -440,7 +453,7 @@ export const EditorDrawer = forwardRef<EditorDrawerHandle, EditorDrawerProps>(fu
                     disabled={pending}
                     onClick={() => setSelectedAttachments((current) => current.filter((item) => item.path !== attachment.path))}
                   >
-                    <img src={sourceForAttachment(attachment)} alt="" loading="lazy" decoding="async" />
+                    <img src={sourceForAttachment(attachment)} alt="" loading="lazy" decoding="async" draggable={false} />
                   </button>
                 ))}
               </div>
@@ -529,16 +542,12 @@ function MessageView({
   const attachments = message.attachments.length ? (
     <div className="editor-message-attachments">
       {message.attachments.map((attachment) => (
-        <button
-          className="editor-attachment-card"
-          type="button"
+        <AttachmentPreview
           key={attachment.path}
-          aria-label="预览图片"
-          onClick={() => onPreview(attachment)}
-          onContextMenu={(event) => onAttachmentContextMenu(event, attachment)}
-        >
-          <img src={sourceForAttachment(attachment)} alt="" loading="lazy" decoding="async" />
-        </button>
+          attachment={attachment}
+          onPreview={onPreview}
+          onContextMenu={onAttachmentContextMenu}
+        />
       ))}
     </div>
   ) : null;
@@ -559,6 +568,41 @@ function MessageView({
         </>
       )}
     </article>
+  );
+}
+
+function AttachmentPreview({
+  attachment,
+  onPreview,
+  onContextMenu,
+}: {
+  attachment: Attachment;
+  onPreview: (attachment: Attachment) => void;
+  onContextMenu: (event: MouseEvent, attachment: Attachment) => void;
+}) {
+  const [missing, setMissing] = useState(false);
+  return (
+    <button
+      className={classNames("editor-attachment-card", missing && "is-missing")}
+      type="button"
+      aria-label={missing ? "图片不可用" : "预览图片"}
+      disabled={missing}
+      onClick={() => onPreview(attachment)}
+      onContextMenu={(event) => onContextMenu(event, attachment)}
+    >
+      {missing ? (
+        <span className="editor-attachment-missing">图片已移动或不存在</span>
+      ) : (
+        <img
+          src={sourceForAttachment(attachment)}
+          alt=""
+          loading="lazy"
+          decoding="async"
+          draggable={false}
+          onError={() => setMissing(true)}
+        />
+      )}
+    </button>
   );
 }
 
