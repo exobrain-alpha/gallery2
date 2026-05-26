@@ -2403,7 +2403,7 @@ pub fn run() {
             start_resource_cleanup(app.handle().clone());
 
             let settings = MenuItem::with_id(app, SETTINGS_MENU_ID, "设置", true, None::<&str>)?;
-            let gallery = MenuItem::with_id(app, GALLERY_MENU_ID, "瀑布", true, None::<&str>)?;
+            let gallery = MenuItem::with_id(app, GALLERY_MENU_ID, "瀑布流", true, None::<&str>)?;
             let carousel = MenuItem::with_id(app, CAROUSEL_MENU_ID, "走马灯", true, None::<&str>)?;
             let menu = Menu::with_items(app, &[&settings, &gallery, &carousel])?;
             let mut tray_builder = TrayIconBuilder::with_id("gallery")

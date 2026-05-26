@@ -19,6 +19,7 @@ const COPY_FEEDBACK_MS = 1100;
 const RETRY_FEEDBACK_MS = 520;
 const IMAGE_COUNT_VALUES = [1, 2, 3, 4];
 const SESSION_SAVE_DEBOUNCE_MS = 260;
+const BOTTOM_STICK_THRESHOLD = 80;
 
 const ASPECT_BUTTONS = [
   { key: "auto", kind: "single", values: ["auto"], label: "Auto" },
@@ -108,6 +109,7 @@ export const EditorDrawer = forwardRef<EditorDrawerHandle, EditorDrawerProps>(fu
   const saveTimerRef = useRef<number>(0);
   const sessionTokenRef = useRef(0);
   const messagesStateRef = useRef<Message[]>([]);
+  const shouldStickToBottomRef = useRef(true);
 
   useEffect(() => {
     loadCurrentSession().catch((error) => onError(error, "加载会话失败"));
@@ -115,7 +117,9 @@ export const EditorDrawer = forwardRef<EditorDrawerHandle, EditorDrawerProps>(fu
 
   useEffect(() => {
     messagesStateRef.current = messages;
-    messagesRef.current?.scrollTo({ top: messagesRef.current.scrollHeight });
+    const messagesElement = messagesRef.current;
+    if (!messagesElement || !shouldStickToBottomRef.current) return;
+    window.requestAnimationFrame(() => scrollMessagesToBottom(messagesElement));
   }, [messages]);
 
   useEffect(() => {
@@ -217,6 +221,12 @@ export const EditorDrawer = forwardRef<EditorDrawerHandle, EditorDrawerProps>(fu
       input.focus({ preventScroll: true });
       input.setSelectionRange(input.value.length, input.value.length);
     }, 0);
+  }
+
+  function handleMessagesScroll() {
+    const messagesElement = messagesRef.current;
+    if (!messagesElement) return;
+    shouldStickToBottomRef.current = isNearMessagesBottom(messagesElement);
   }
 
   function applyAspectToggle(key: string | undefined) {
@@ -376,7 +386,7 @@ export const EditorDrawer = forwardRef<EditorDrawerHandle, EditorDrawerProps>(fu
       <button className="editor-drawer-backdrop" type="button" aria-label="关闭" onClick={closeDrawer} />
       <aside className="editor-drawer-panel" role="dialog" aria-modal="true" aria-label="编辑">
         <div className="editor-drawer-shell">
-          <section className="editor-messages" ref={messagesRef} aria-live="polite">
+          <section className="editor-messages" ref={messagesRef} aria-live="polite" onScroll={handleMessagesScroll}>
             {messages.map((message) => (
               <MessageView
                 key={message.id}
@@ -725,6 +735,21 @@ function resizeTextarea(element: HTMLTextAreaElement | null) {
   element.style.height = "0px";
   element.style.height = `${Math.min(element.scrollHeight, 160)}px`;
   element.style.overflowY = element.scrollHeight > 160 ? "auto" : "hidden";
+}
+
+function isNearMessagesBottom(element: HTMLDivElement) {
+  return element.scrollHeight - element.scrollTop - element.clientHeight <= BOTTOM_STICK_THRESHOLD;
+}
+
+function scrollMessagesToBottom(element: HTMLDivElement) {
+  element.scrollTo({ top: element.scrollHeight });
+  shouldStickToBottomIfAtBottom(element);
+}
+
+function shouldStickToBottomIfAtBottom(element: HTMLDivElement) {
+  if (isNearMessagesBottom(element)) {
+    element.scrollTop = element.scrollHeight;
+  }
 }
 
 function nextAspectRatio(key: string | undefined, currentValue: string) {

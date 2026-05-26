@@ -1077,8 +1077,6 @@ textarea:focus {
   display: flex;
   flex-direction: column;
   gap: 10px;
-  content-visibility: auto;
-  contain-intrinsic-size: 240px;
 }
 
 .editor-message-assistant {

@@ -267,7 +267,7 @@ export function SettingsView() {
               onClick={handleOpenGallery}
             >
               <Icons.ArrowTopRight />
-              <span>打开瀑布</span>
+              <span>打开瀑布流</span>
             </button>
             <button
               className="secondary-button icon-button"
@@ -470,12 +470,7 @@ export function SettingsView() {
               <Icons.ArrowPath />
               <span>扫描</span>
             </button>
-            <button
-              className="primary-button"
-              type="button"
-              disabled={!dirty}
-              onClick={handleSave}
-            >
+            <button className="primary-button" type="button" disabled={!dirty} onClick={handleSave}>
               保存
             </button>
           </div>
