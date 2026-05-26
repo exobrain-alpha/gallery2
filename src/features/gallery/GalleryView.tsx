@@ -10,7 +10,7 @@ import type {
   PickedImage,
   XaiEditResult,
 } from "../../types";
-import { classNames, logError, mediaName, setPageBackground } from "../../utils";
+import { classNames, logError, mediaName, setPageBackground, storeGalleryTheme, storedGalleryTheme } from "../../utils";
 
 const PAGE_SIZE = 50;
 const OVERSCAN = 1200;
@@ -46,6 +46,7 @@ interface ContextMenuState {
 
 export function GalleryView() {
   const [preferences, setPreferences] = useState<GalleryPreferences | null>(null);
+  const initialTheme = useMemo(() => storedGalleryTheme(), []);
   const [records, setRecords] = useState<ImageRecord[]>([]);
   const [done, setDone] = useState(false);
   const [viewport, setViewport] = useState<ViewportState>(() => ({
@@ -66,13 +67,15 @@ export function GalleryView() {
   const playingVideosRef = useRef<Map<string, HTMLVideoElement>>(new Map());
 
   useEffect(() => {
+    setPageBackground(initialTheme === "black" ? "#1a1b1e" : "#ffffff");
     invoke<GalleryPreferences>("get_gallery_preferences")
       .then((loadedPreferences) => {
         setPreferences(loadedPreferences);
+        storeGalleryTheme(loadedPreferences.theme);
         setPageBackground(loadedPreferences.theme === "black" ? "#1a1b1e" : "#ffffff");
       })
       .catch((error) => logError(error, "Failed to load gallery preferences"));
-  }, []);
+  }, [initialTheme]);
 
   useEffect(() => {
     let frame = 0;
@@ -145,6 +148,20 @@ export function GalleryView() {
   }, []);
 
   useEffect(() => {
+    const reloadEmptyGallery = () => {
+      if (recordsRef.current.length > 0) return;
+      reloadFirstPage().catch((error) => logError(error, "Failed to reload gallery page"));
+    };
+
+    window.addEventListener("gallery:reload", reloadEmptyGallery);
+    const timer = window.setInterval(reloadEmptyGallery, 2000);
+    return () => {
+      window.removeEventListener("gallery:reload", reloadEmptyGallery);
+      window.clearInterval(timer);
+    };
+  }, []);
+
+  useEffect(() => {
     const sentinel = sentinelRef.current;
     if (!sentinel) return;
     const observer = new IntersectionObserver((entries) => {
@@ -207,6 +224,18 @@ export function GalleryView() {
     } finally {
       loadingRef.current = false;
     }
+  }
+
+  async function reloadFirstPage() {
+    if (loadingRef.current) return;
+    cursorRef.current = null;
+    doneRef.current = false;
+    setDone(false);
+    if (recordsRef.current.length > 0) {
+      recordsRef.current = [];
+      setRecords([]);
+    }
+    await loadMore();
   }
 
   function showPreview(record: ImageRecord) {
@@ -304,7 +333,7 @@ export function GalleryView() {
   }
 
   if (!preferences) {
-    return <main className="gallery-shell theme-white" />;
+    return <main className={`gallery-shell theme-${initialTheme}`} />;
   }
 
   const themeClass = `theme-${preferences.theme === "black" ? "black" : "white"}`;

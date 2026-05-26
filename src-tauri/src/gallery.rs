@@ -1,5 +1,5 @@
 use crate::models::{ImageCursor, ImagePage, ImageRecord};
-use crate::{configured_thumbnail_dir, open_db, thumbnail_enabled};
+use crate::{configured_thumbnail_dir, open_db};
 use rusqlite::{params, Connection, OptionalExtension};
 use std::{fs, path::Path};
 use tauri::Manager;
@@ -23,17 +23,12 @@ pub(crate) fn list_images(
     limit: i64,
 ) -> Result<ImagePage, String> {
     let conn = open_db(&app)?;
-    let thumbnails_enabled = thumbnail_enabled(&conn)?;
-    let thumbnail_dir = thumbnails_enabled
-        .then(|| configured_thumbnail_dir(&app, &conn))
-        .transpose()?;
-    if let Some(dir) = &thumbnail_dir {
-        fs::create_dir_all(dir)
-            .map_err(|err| format!("Failed to create thumbnail directory: {err}"))?;
-        app.asset_protocol_scope()
-            .allow_directory(dir, true)
-            .map_err(|err| format!("Failed to allow thumbnail directory: {err}"))?;
-    }
+    let thumbnail_dir = configured_thumbnail_dir(&app, &conn)?;
+    fs::create_dir_all(&thumbnail_dir)
+        .map_err(|err| format!("Failed to create thumbnail directory: {err}"))?;
+    app.asset_protocol_scope()
+        .allow_directory(&thumbnail_dir, true)
+        .map_err(|err| format!("Failed to allow thumbnail directory: {err}"))?;
     let limit = limit.clamp(1, 120);
     let fetch_limit = limit + 1;
 
@@ -90,7 +85,7 @@ pub(crate) fn list_images(
         });
     let records = records
         .into_iter()
-        .map(|record| image_record_from_raw(&conn, thumbnail_dir.as_deref(), record))
+        .map(|record| image_record_from_raw(&conn, &thumbnail_dir, record))
         .collect::<Vec<_>>();
 
     Ok(ImagePage {
@@ -112,17 +107,21 @@ fn raw_record_from_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<RawImageReco
 
 fn image_record_from_raw(
     conn: &Connection,
-    thumbnail_dir: Option<&Path>,
+    thumbnail_dir: &Path,
     record: RawImageRecord,
 ) -> ImageRecord {
     let display_path = if record.media_type == "image" {
-        thumbnail_dir
-            .and_then(|dir| {
-                existing_thumbnail(conn, dir, &record.path, record.modified, record.size).ok()
-            })
-            .flatten()
-            .map(|thumbnail| thumbnail.path)
-            .unwrap_or_else(|| record.path.clone())
+        existing_thumbnail(
+            conn,
+            thumbnail_dir,
+            &record.path,
+            record.modified,
+            record.size,
+        )
+        .ok()
+        .flatten()
+        .map(|thumbnail| thumbnail.path)
+        .unwrap_or_else(|| record.path.clone())
     } else {
         record.path.clone()
     };

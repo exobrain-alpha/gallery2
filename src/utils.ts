@@ -1,5 +1,29 @@
 import type { DedupeSummary, ExtensionRepairSummary, ScanSummary } from "./types";
 
+const GALLERY_THEME_STORAGE_KEY = "gallery.theme";
+
+export function storedGalleryTheme() {
+  const params = new URLSearchParams(window.location.search);
+  const queryTheme = params.get("theme");
+  if (queryTheme === "black" || queryTheme === "white") {
+    return queryTheme;
+  }
+
+  try {
+    return window.localStorage.getItem(GALLERY_THEME_STORAGE_KEY) === "black" ? "black" : "white";
+  } catch {
+    return "white";
+  }
+}
+
+export function storeGalleryTheme(theme: "black" | "white") {
+  try {
+    window.localStorage.setItem(GALLERY_THEME_STORAGE_KEY, theme);
+  } catch {
+    // Ignore storage failures; the backend preference remains authoritative.
+  }
+}
+
 export function setPageBackground(color: string) {
   document.documentElement.style.background = color;
   document.body.style.background = color;

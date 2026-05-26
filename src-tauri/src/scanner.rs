@@ -15,6 +15,9 @@ use std::{
 };
 use tauri::Manager;
 
+const SCAN_PROGRESS_NOTIFY_EVERY: usize = 50;
+
+#[allow(dead_code)]
 struct ThumbnailSource {
     path: String,
     modified: i64,
@@ -26,12 +29,9 @@ pub(crate) fn scan_library(
     paths: Vec<String>,
 ) -> Result<ScanSummary, String> {
     let roots = collect_roots(&paths);
-    let mut conn = open_db(&app)?;
+    let conn = open_db(&app)?;
     let existing_records = load_existing_media_records(&conn)?;
     let updated_at = now_nanos();
-    let tx = conn
-        .transaction()
-        .map_err(|err| format!("Failed to start scan transaction: {err}"))?;
 
     let mut indexed = 0usize;
     let mut skipped = 0usize;
@@ -42,25 +42,30 @@ pub(crate) fn scan_library(
             root,
             &mut root_skipped,
             &mut |media_path| match upsert_image_incremental(
-                &tx,
+                &conn,
                 &existing_records,
                 &media_path,
                 updated_at,
             ) {
-                Ok(()) => indexed += 1,
+                Ok(()) => {
+                    indexed += 1;
+                    if indexed % SCAN_PROGRESS_NOTIFY_EVERY == 0 {
+                        reload_gallery_window(&app);
+                    }
+                }
                 Err(_) => failed += 1,
             },
         );
         skipped += root_skipped + failed;
     }
 
-    let removed = tx
+    let removed = conn
         .execute(
             "DELETE FROM images WHERE updated_at != ?1",
             params![updated_at],
         )
         .map_err(|err| format!("Failed to remove stale images: {err}"))?;
-    tx.execute(
+    conn.execute(
         "
         DELETE FROM image_thumbnails
         WHERE NOT EXISTS (
@@ -70,13 +75,12 @@ pub(crate) fn scan_library(
         [],
     )
     .map_err(|err| format!("Failed to remove stale thumbnail records: {err}"))?;
-    let total = tx
+    let total = conn
         .query_row("SELECT COUNT(*) FROM images", [], |row| {
             row.get::<_, i64>(0)
         })
         .map_err(|err| format!("Failed to count images: {err}"))?;
-    tx.commit()
-        .map_err(|err| format!("Failed to finish scan: {err}"))?;
+    reload_gallery_window(&app);
 
     Ok(ScanSummary {
         indexed,
@@ -86,24 +90,20 @@ pub(crate) fn scan_library(
     })
 }
 
-pub(crate) fn scan_library_and_generate_thumbnails(
-    app: tauri::AppHandle,
-    paths: Vec<String>,
-    progress: Arc<Mutex<ThumbnailProgress>>,
-) {
+#[allow(dead_code)]
+pub(crate) fn generate_thumbnails(app: tauri::AppHandle, progress: Arc<Mutex<ThumbnailProgress>>) {
     set_thumbnail_progress(&progress, |state| {
         state.running = true;
-        state.stage = "scanning".to_string();
+        state.stage = "generating".to_string();
         state.processed = 0;
         state.total = 0;
         state.generated = 0;
         state.skipped = 0;
-        state.message = "扫描素材中...".to_string();
+        state.message = "生成缩略图中...".to_string();
         state.error.clear();
     });
 
     let result = (|| -> Result<(), String> {
-        let scan_summary = scan_library(app.clone(), paths)?;
         let conn = open_db(&app)?;
         let thumbnail_dir = configured_thumbnail_dir(&app, &conn)?;
         fs::create_dir_all(&thumbnail_dir)
@@ -118,10 +118,7 @@ pub(crate) fn scan_library_and_generate_thumbnails(
             state.total = sources.len();
             state.generated = 0;
             state.skipped = 0;
-            state.message = format!(
-                "扫描完成，共 {} 个图片资源，开始生成缩略图...",
-                sources.len()
-            );
+            state.message = format!("生成缩略图 0/{}", sources.len());
         });
 
         for source in sources {
@@ -148,8 +145,8 @@ pub(crate) fn scan_library_and_generate_thumbnails(
             state.running = false;
             state.stage = "done".to_string();
             state.message = format!(
-                "缩略图完成：扫描后索引 {} 个资源，生成 {} 个，复用/跳过 {} 个",
-                scan_summary.total, state.generated, state.skipped
+                "缩略图完成：生成 {} 个，复用/跳过 {} 个",
+                state.generated, state.skipped
             );
         });
         Ok(())
@@ -165,6 +162,13 @@ pub(crate) fn scan_library_and_generate_thumbnails(
     }
 }
 
+fn reload_gallery_window(app: &tauri::AppHandle) {
+    if let Some(window) = app.get_webview_window(GALLERY_LABEL) {
+        let _ = window.eval("window.dispatchEvent(new CustomEvent('gallery:reload'))");
+    }
+}
+
+#[allow(dead_code)]
 fn set_thumbnail_progress(
     progress: &Arc<Mutex<ThumbnailProgress>>,
     update: impl FnOnce(&mut ThumbnailProgress),
@@ -174,6 +178,7 @@ fn set_thumbnail_progress(
     }
 }
 
+#[allow(dead_code)]
 fn thumbnail_sources(conn: &Connection) -> Result<Vec<ThumbnailSource>, String> {
     let mut stmt = conn
         .prepare(
@@ -199,6 +204,7 @@ fn thumbnail_sources(conn: &Connection) -> Result<Vec<ThumbnailSource>, String> 
     Ok(sources)
 }
 
+#[allow(dead_code)]
 fn ensure_thumbnail(
     conn: &Connection,
     thumbnail_dir: &Path,

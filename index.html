@@ -4,6 +4,23 @@
     <meta charset="UTF-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
     <title>Gallery</title>
+    <script>
+      (() => {
+        const params = new URLSearchParams(window.location.search);
+        if ((params.get("view") || "gallery") !== "gallery") return;
+        const queryTheme = params.get("theme");
+        let theme = queryTheme === "black" ? "black" : "white";
+        try {
+          theme = queryTheme === "black" || queryTheme === "white"
+            ? theme
+            : window.localStorage.getItem("gallery.theme") === "black" ? "black" : "white";
+        } catch {
+          theme = queryTheme === "black" ? "black" : "white";
+        }
+        const color = theme === "black" ? "#1a1b1e" : "#ffffff";
+        document.documentElement.style.background = color;
+      })();
+    </script>
   </head>
 
   <body>

@@ -37,7 +37,9 @@ const GALLERY_MENU_ID: &str = "open_gallery";
 pub(crate) const DEDUPE_MAX_FILE_SIZE: u64 = 100 * 1024 * 1024;
 const EDITOR_SESSION_SEGMENT_TURNS: usize = 100;
 const ENCRYPTED_XAI_KEY_PREFIX: &str = "enc:v1:";
+#[allow(dead_code)]
 pub(crate) const THUMBNAIL_MAX_EDGE: u32 = 768;
+#[allow(dead_code)]
 pub(crate) const THUMBNAIL_QUALITY: u8 = 82;
 type ThumbnailProgressState = Arc<Mutex<ThumbnailProgress>>;
 
@@ -158,13 +160,26 @@ pub(crate) fn configured_generated_content_dir(
     app: &tauri::AppHandle,
     conn: &Connection,
 ) -> Result<PathBuf, String> {
+    let app_dir = fs::canonicalize(app_data_dir(app)?)
+        .map_err(|err| format!("Failed to canonicalize app data directory: {err}"))?;
     let default_dir = default_generated_content_dir(app)?;
     let stored = read_config(
         conn,
         "generated_content_dir",
         &default_dir.to_string_lossy(),
     )?;
-    Ok(PathBuf::from(stored))
+    let dir = PathBuf::from(stored);
+    let points_to_app_dir = dir == app_dir
+        || fs::canonicalize(&dir)
+            .ok()
+            .is_some_and(|canonical| canonical == app_dir);
+    let normalized_dir = if points_to_app_dir { default_dir } else { dir };
+    write_config(
+        conn,
+        "generated_content_dir",
+        &normalized_dir.to_string_lossy(),
+    )?;
+    Ok(normalized_dir)
 }
 
 pub(crate) fn configured_thumbnail_dir(
@@ -927,6 +942,7 @@ fn base64_decode(input: &str) -> Result<Vec<u8>, String> {
     Ok(decoded)
 }
 
+#[allow(dead_code)]
 pub(crate) fn hex_encode(data: &[u8]) -> String {
     const TABLE: &[u8; 16] = b"0123456789abcdef";
     let mut encoded = String::with_capacity(data.len() * 2);
@@ -937,6 +953,7 @@ pub(crate) fn hex_encode(data: &[u8]) -> String {
     encoded
 }
 
+#[allow(dead_code)]
 pub(crate) fn thumbnail_cache_key(path: &str, modified: i64, size: i64) -> String {
     let mut hasher = Sha256::new();
     hasher.update(path.as_bytes());
@@ -945,6 +962,7 @@ pub(crate) fn thumbnail_cache_key(path: &str, modified: i64, size: i64) -> Strin
     hex_encode(&hasher.finalize())
 }
 
+#[allow(dead_code)]
 pub(crate) fn write_image_thumbnail(
     source: &Path,
     destination: &Path,
@@ -1432,6 +1450,53 @@ fn replace_source_paths(conn: &mut Connection, roots: &[PathBuf]) -> Result<Vec<
     Ok(stored_paths)
 }
 
+fn media_path_in_roots(path: &str, roots: &[PathBuf]) -> bool {
+    let path = Path::new(path);
+    roots.iter().any(|root| path.starts_with(root))
+}
+
+fn cleanup_unconfigured_resources(app: tauri::AppHandle) -> Result<(), String> {
+    let conn = open_db(&app)?;
+    let roots = source_roots_from_conn(&conn)?;
+    let mut stmt = conn
+        .prepare("SELECT path FROM images")
+        .map_err(|err| format!("Failed to prepare resource cleanup query: {err}"))?;
+    let paths = stmt
+        .query_map([], |row| row.get::<_, String>(0))
+        .map_err(|err| format!("Failed to query resource cleanup paths: {err}"))?
+        .collect::<Result<Vec<_>, _>>()
+        .map_err(|err| format!("Failed to collect resource cleanup paths: {err}"))?;
+    drop(stmt);
+
+    for path in paths {
+        if media_path_in_roots(&path, &roots) {
+            continue;
+        }
+        conn.execute("DELETE FROM images WHERE path = ?1", params![path])
+            .map_err(|err| format!("Failed to remove unconfigured resource: {err}"))?;
+    }
+
+    conn.execute(
+        "
+        DELETE FROM image_thumbnails
+        WHERE NOT EXISTS (
+            SELECT 1 FROM images WHERE images.path = image_thumbnails.image_path
+        )
+        ",
+        [],
+    )
+    .map_err(|err| format!("Failed to remove unconfigured thumbnail records: {err}"))?;
+    Ok(())
+}
+
+fn start_resource_cleanup(app: tauri::AppHandle) {
+    tauri::async_runtime::spawn_blocking(move || {
+        if let Err(err) = cleanup_unconfigured_resources(app) {
+            eprintln!("Failed to clean unconfigured resources: {err}");
+        }
+    });
+}
+
 #[derive(Clone)]
 pub(crate) struct ExistingMediaRecord {
     media_type: String,
@@ -1604,20 +1669,38 @@ fn show_window(app: &tauri::AppHandle, label: &str) -> Result<(), String> {
             refresh_asset_scope(app)?;
             let preferences = get_gallery_preferences_from_app(app)?;
             apply_gallery_window_preferences(&window, &preferences)?;
+        } else if label == SETTINGS_LABEL {
+            window
+                .eval("window.location.reload()")
+                .map_err(|err| format!("Failed to reload settings window: {err}"))?;
         }
         bring_window_to_front(&window)?;
         return Ok(());
     }
 
-    let (title, url, width, height) = match label {
-        SETTINGS_LABEL => ("Gallery Settings", "index.html?view=settings", 760.0, 620.0),
-        GALLERY_LABEL => ("Gallery", "index.html?view=gallery", 1240.0, 860.0),
+    let (title, view, width, height) = match label {
+        SETTINGS_LABEL => ("Gallery Settings", "settings", 760.0, 620.0),
+        GALLERY_LABEL => ("Gallery", "gallery", 1240.0, 860.0),
         _ => return Err(format!("Unknown window label: {label}")),
     };
 
-    let background_color = if label == GALLERY_LABEL {
+    let gallery_preferences = if label == GALLERY_LABEL {
         refresh_asset_scope(app)?;
-        gallery_background_color(&get_gallery_preferences_from_app(app)?)
+        Some(get_gallery_preferences_from_app(app)?)
+    } else {
+        None
+    };
+    let url = if let Some(preferences) = &gallery_preferences {
+        format!("index.html?view={view}&theme={}", preferences.theme)
+    } else {
+        format!("index.html?view={view}")
+    };
+    let background_color = if label == GALLERY_LABEL {
+        gallery_background_color(
+            gallery_preferences
+                .as_ref()
+                .ok_or_else(|| "Missing gallery preferences".to_string())?,
+        )
     } else {
         Color(246, 246, 244, 255)
     };
@@ -1632,7 +1715,9 @@ fn show_window(app: &tauri::AppHandle, label: &str) -> Result<(), String> {
         .center();
 
     if label == GALLERY_LABEL {
-        let preferences = get_gallery_preferences_from_app(app)?;
+        let preferences = gallery_preferences
+            .as_ref()
+            .ok_or_else(|| "Missing gallery preferences".to_string())?;
         #[cfg(target_os = "macos")]
         {
             builder = builder.title_bar_style(TitleBarStyle::Visible);
@@ -1653,8 +1738,7 @@ fn show_window(app: &tauri::AppHandle, label: &str) -> Result<(), String> {
     if label == GALLERY_LABEL {
         configure_gallery_window_for_fullscreen(&window)?;
     }
-    if label == GALLERY_LABEL {
-        let preferences = get_gallery_preferences_from_app(app)?;
+    if let Some(preferences) = &gallery_preferences {
         apply_gallery_window_preferences(&window, &preferences)?;
     }
     let window_to_hide = window.clone();
@@ -1677,14 +1761,8 @@ fn bring_window_to_front(window: &WebviewWindow) -> Result<(), String> {
         .unminimize()
         .map_err(|err| format!("Failed to restore window: {err}"))?;
     window
-        .set_always_on_top(true)
-        .map_err(|err| format!("Failed to raise window: {err}"))?;
-    window
         .set_focus()
         .map_err(|err| format!("Failed to focus window: {err}"))?;
-    window
-        .set_always_on_top(false)
-        .map_err(|err| format!("Failed to restore window level: {err}"))?;
     Ok(())
 }
 
@@ -1711,6 +1789,17 @@ fn configure_gallery_window_for_fullscreen(window: &tauri::WebviewWindow) -> Res
 #[tauri::command]
 fn open_app_window(app: tauri::AppHandle, label: String) -> Result<(), String> {
     show_window(&app, &label)
+}
+
+#[tauri::command]
+fn open_gallery_from_settings(app: tauri::AppHandle) -> Result<(), String> {
+    show_window(&app, GALLERY_LABEL)?;
+    if let Some(window) = app.get_webview_window(SETTINGS_LABEL) {
+        window
+            .hide()
+            .map_err(|err| format!("Failed to hide settings window: {err}"))?;
+    }
+    Ok(())
 }
 
 #[tauri::command]
@@ -1799,6 +1888,7 @@ fn save_source_paths(app: tauri::AppHandle, paths: Vec<String>) -> Result<Vec<St
     let mut conn = open_db(&app)?;
     let stored_paths = replace_source_paths(&mut conn, &roots)?;
     refresh_asset_scope_with_conn(&app, &conn)?;
+    start_resource_cleanup(app);
     Ok(stored_paths)
 }
 
@@ -1809,15 +1899,25 @@ fn save_xai_settings(
     generated_content_dir: String,
 ) -> Result<(), String> {
     let conn = open_db(&app)?;
+    let app_dir = fs::canonicalize(app_data_dir(&app)?)
+        .map_err(|err| format!("Failed to canonicalize app data directory: {err}"))?;
+    let default_dir = default_generated_content_dir(&app)?;
     let dir = if generated_content_dir.trim().is_empty() {
-        default_generated_content_dir(&app)?
+        default_dir
     } else {
         PathBuf::from(generated_content_dir.trim())
     };
     fs::create_dir_all(&dir)
         .map_err(|err| format!("Failed to create generated content directory: {err}"))?;
-    let dir = fs::canonicalize(&dir)
+    let mut dir = fs::canonicalize(&dir)
         .map_err(|err| format!("Failed to canonicalize generated content directory: {err}"))?;
+    if dir == app_dir {
+        dir = default_generated_content_dir(&app)?;
+        fs::create_dir_all(&dir)
+            .map_err(|err| format!("Failed to create generated content directory: {err}"))?;
+        dir = fs::canonicalize(&dir)
+            .map_err(|err| format!("Failed to canonicalize generated content directory: {err}"))?;
+    }
     write_xai_key_config(&app, &conn, &xai_key)?;
     write_config(&conn, "generated_content_dir", &dir.to_string_lossy())?;
     refresh_asset_scope_with_conn(&app, &conn)?;
@@ -1831,6 +1931,12 @@ fn save_thumbnail_settings(
     thumbnail_dir: String,
 ) -> Result<(), String> {
     let conn = open_db(&app)?;
+    if !thumbnail_enabled {
+        write_config(&conn, "thumbnail_enabled", "false")?;
+        refresh_asset_scope_with_conn(&app, &conn)?;
+        return Ok(());
+    }
+
     let dir = if thumbnail_dir.trim().is_empty() {
         default_thumbnail_dir(&app)?
     } else {
@@ -1851,17 +1957,9 @@ fn save_thumbnail_settings(
 }
 
 #[tauri::command]
-fn start_thumbnail_scan(app: tauri::AppHandle, paths: Vec<String>) -> Result<(), String> {
-    let progress = app.state::<ThumbnailProgressState>().inner().clone();
-    let already_running = progress.lock().map(|state| state.running).unwrap_or(false);
-    if already_running {
-        return Err("缩略图任务正在运行".to_string());
-    }
-
-    tauri::async_runtime::spawn_blocking(move || {
-        scanner::scan_library_and_generate_thumbnails(app, paths, progress);
-    });
-    Ok(())
+fn start_thumbnail_generation(app: tauri::AppHandle) -> Result<(), String> {
+    let _ = app;
+    Err("缩略图生成已禁用".to_string())
 }
 
 #[tauri::command]
@@ -2308,10 +2406,10 @@ pub fn run() {
             if let Err(err) = refresh_asset_scope(&app.handle().clone()) {
                 eprintln!("Failed to refresh asset scope: {err}");
             }
+            start_resource_cleanup(app.handle().clone());
 
             let settings = MenuItem::with_id(app, SETTINGS_MENU_ID, "设置", true, None::<&str>)?;
-            let gallery =
-                MenuItem::with_id(app, GALLERY_MENU_ID, "打开瀑布流窗口", true, None::<&str>)?;
+            let gallery = MenuItem::with_id(app, GALLERY_MENU_ID, "瀑布", true, None::<&str>)?;
             let menu = Menu::with_items(app, &[&settings, &gallery])?;
             let mut tray_builder = TrayIconBuilder::with_id("gallery")
                 .tooltip("Gallery")
@@ -2339,13 +2437,14 @@ pub fn run() {
         })
         .invoke_handler(tauri::generate_handler![
             open_app_window,
+            open_gallery_from_settings,
             get_settings,
             get_gallery_preferences,
             save_gallery_preferences,
             save_source_paths,
             save_xai_settings,
             save_thumbnail_settings,
-            start_thumbnail_scan,
+            start_thumbnail_generation,
             get_thumbnail_progress,
             pick_source_folders,
             pick_duplicate_folder,
