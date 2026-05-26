@@ -34,6 +34,7 @@ pub(crate) const CAROUSEL_LABEL: &str = "carousel";
 const SETTINGS_MENU_ID: &str = "open_settings";
 const GALLERY_MENU_ID: &str = "open_gallery";
 const CAROUSEL_MENU_ID: &str = "open_carousel";
+const QUIT_MENU_ID: &str = "quit";
 pub(crate) const DEDUPE_MAX_FILE_SIZE: u64 = 100 * 1024 * 1024;
 const EDITOR_SESSION_SEGMENT_TURNS: usize = 100;
 const ENCRYPTED_XAI_KEY_PREFIX: &str = "enc:v1:";
@@ -2405,13 +2406,19 @@ pub fn run() {
             let settings = MenuItem::with_id(app, SETTINGS_MENU_ID, "设置", true, None::<&str>)?;
             let gallery = MenuItem::with_id(app, GALLERY_MENU_ID, "瀑布流", true, None::<&str>)?;
             let carousel = MenuItem::with_id(app, CAROUSEL_MENU_ID, "走马灯", true, None::<&str>)?;
-            let menu = Menu::with_items(app, &[&settings, &gallery, &carousel])?;
+            let quit = MenuItem::with_id(app, QUIT_MENU_ID, "退出", true, None::<&str>)?;
+            let menu = Menu::with_items(app, &[&settings, &gallery, &carousel, &quit])?;
             let mut tray_builder = TrayIconBuilder::with_id("gallery")
                 .tooltip("Gallery")
                 .menu(&menu)
                 .show_menu_on_left_click(true)
                 .on_menu_event(|app, event| {
                     let id = event.id().as_ref();
+                    if id == QUIT_MENU_ID {
+                        app.exit(0);
+                        return;
+                    }
+
                     let label = match id {
                         SETTINGS_MENU_ID => Some(SETTINGS_LABEL),
                         GALLERY_MENU_ID => Some(GALLERY_LABEL),
