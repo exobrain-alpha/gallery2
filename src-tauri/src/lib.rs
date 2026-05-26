@@ -8,8 +8,6 @@ use aes_gcm::{
 };
 use image::{codecs::jpeg::JpegEncoder, ImageFormat, ImageReader};
 use models::*;
-#[cfg(target_os = "macos")]
-use objc2_app_kit::{NSWindow, NSWindowCollectionBehavior};
 use rusqlite::{params, Connection};
 use sha2::{Digest, Sha256};
 use std::{
@@ -32,8 +30,10 @@ use tauri_plugin_dialog::DialogExt;
 
 const SETTINGS_LABEL: &str = "settings";
 pub(crate) const GALLERY_LABEL: &str = "gallery";
+pub(crate) const CAROUSEL_LABEL: &str = "carousel";
 const SETTINGS_MENU_ID: &str = "open_settings";
 const GALLERY_MENU_ID: &str = "open_gallery";
+const CAROUSEL_MENU_ID: &str = "open_carousel";
 pub(crate) const DEDUPE_MAX_FILE_SIZE: u64 = 100 * 1024 * 1024;
 const EDITOR_SESSION_SEGMENT_TURNS: usize = 100;
 const ENCRYPTED_XAI_KEY_PREFIX: &str = "enc:v1:";
@@ -561,6 +561,10 @@ fn apply_gallery_window_preferences(
         }))
         .map_err(|err| format!("Failed to set gallery theme: {err}"))?;
     Ok(())
+}
+
+fn is_gallery_window(label: &str) -> bool {
+    label == GALLERY_LABEL || label == CAROUSEL_LABEL
 }
 
 fn now_secs() -> i64 {
@@ -1661,11 +1665,7 @@ pub(crate) fn upsert_image(
 
 fn show_window(app: &tauri::AppHandle, label: &str) -> Result<(), String> {
     if let Some(window) = app.get_webview_window(label) {
-        #[cfg(target_os = "macos")]
-        if label == GALLERY_LABEL {
-            configure_gallery_window_for_fullscreen(&window)?;
-        }
-        if label == GALLERY_LABEL {
+        if is_gallery_window(label) {
             refresh_asset_scope(app)?;
             let preferences = get_gallery_preferences_from_app(app)?;
             apply_gallery_window_preferences(&window, &preferences)?;
@@ -1681,10 +1681,11 @@ fn show_window(app: &tauri::AppHandle, label: &str) -> Result<(), String> {
     let (title, view, width, height) = match label {
         SETTINGS_LABEL => ("Gallery Settings", "settings", 760.0, 620.0),
         GALLERY_LABEL => ("Gallery", "gallery", 1240.0, 860.0),
+        CAROUSEL_LABEL => ("Carousel", "carousel", 1240.0, 860.0),
         _ => return Err(format!("Unknown window label: {label}")),
     };
 
-    let gallery_preferences = if label == GALLERY_LABEL {
+    let gallery_preferences = if is_gallery_window(label) {
         refresh_asset_scope(app)?;
         Some(get_gallery_preferences_from_app(app)?)
     } else {
@@ -1695,7 +1696,7 @@ fn show_window(app: &tauri::AppHandle, label: &str) -> Result<(), String> {
     } else {
         format!("index.html?view={view}")
     };
-    let background_color = if label == GALLERY_LABEL {
+    let background_color = if is_gallery_window(label) {
         gallery_background_color(
             gallery_preferences
                 .as_ref()
@@ -1714,7 +1715,7 @@ fn show_window(app: &tauri::AppHandle, label: &str) -> Result<(), String> {
         .background_color(background_color)
         .center();
 
-    if label == GALLERY_LABEL {
+    if is_gallery_window(label) {
         let preferences = gallery_preferences
             .as_ref()
             .ok_or_else(|| "Missing gallery preferences".to_string())?;
@@ -1727,17 +1728,11 @@ fn show_window(app: &tauri::AppHandle, label: &str) -> Result<(), String> {
         } else {
             Theme::Light
         }));
-    } else {
-        builder = builder.skip_taskbar(true);
     }
 
     let window = builder
         .build()
         .map_err(|err| format!("Failed to build window: {err}"))?;
-    #[cfg(target_os = "macos")]
-    if label == GALLERY_LABEL {
-        configure_gallery_window_for_fullscreen(&window)?;
-    }
     if let Some(preferences) = &gallery_preferences {
         apply_gallery_window_preferences(&window, &preferences)?;
     }
@@ -1766,26 +1761,6 @@ fn bring_window_to_front(window: &WebviewWindow) -> Result<(), String> {
     Ok(())
 }
 
-#[cfg(target_os = "macos")]
-fn configure_gallery_window_for_fullscreen(window: &tauri::WebviewWindow) -> Result<(), String> {
-    let ns_window_ptr = window
-        .ns_window()
-        .map_err(|err| format!("Failed to access native macOS window handle: {err}"))?;
-
-    unsafe {
-        let ns_window = &*(ns_window_ptr.cast::<NSWindow>());
-        let mut behavior = ns_window.collectionBehavior();
-        behavior |= NSWindowCollectionBehavior::FullScreenPrimary;
-        behavior |= NSWindowCollectionBehavior::FullScreenAllowsTiling;
-        behavior &= !NSWindowCollectionBehavior::FullScreenAuxiliary;
-        behavior &= !NSWindowCollectionBehavior::FullScreenNone;
-        behavior &= !NSWindowCollectionBehavior::FullScreenDisallowsTiling;
-        ns_window.setCollectionBehavior(behavior);
-    }
-
-    Ok(())
-}
-
 #[tauri::command]
 fn open_app_window(app: tauri::AppHandle, label: String) -> Result<(), String> {
     show_window(&app, &label)
@@ -1794,6 +1769,17 @@ fn open_app_window(app: tauri::AppHandle, label: String) -> Result<(), String> {
 #[tauri::command]
 fn open_gallery_from_settings(app: tauri::AppHandle) -> Result<(), String> {
     show_window(&app, GALLERY_LABEL)?;
+    if let Some(window) = app.get_webview_window(SETTINGS_LABEL) {
+        window
+            .hide()
+            .map_err(|err| format!("Failed to hide settings window: {err}"))?;
+    }
+    Ok(())
+}
+
+#[tauri::command]
+fn open_carousel_from_settings(app: tauri::AppHandle) -> Result<(), String> {
+    show_window(&app, CAROUSEL_LABEL)?;
     if let Some(window) = app.get_webview_window(SETTINGS_LABEL) {
         window
             .hide()
@@ -1877,6 +1863,12 @@ fn save_gallery_preferences(
         window
             .eval("window.location.reload()")
             .map_err(|err| format!("Failed to reload gallery window: {err}"))?;
+    }
+    if let Some(window) = app.get_webview_window(CAROUSEL_LABEL) {
+        apply_gallery_window_preferences(&window, &preferences)?;
+        window
+            .eval("window.location.reload()")
+            .map_err(|err| format!("Failed to reload carousel window: {err}"))?;
     }
 
     Ok(preferences)
@@ -2394,15 +2386,17 @@ fn list_images(
     gallery::list_images(app, cursor, limit)
 }
 
+#[tauri::command]
+fn list_random_images(app: tauri::AppHandle, limit: i64) -> Result<Vec<ImageRecord>, String> {
+    gallery::list_random_images(app, limit)
+}
+
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     tauri::Builder::default()
         .manage(Arc::new(Mutex::new(initial_thumbnail_progress())) as ThumbnailProgressState)
         .plugin(tauri_plugin_dialog::init())
         .setup(|app| {
-            #[cfg(target_os = "macos")]
-            app.set_activation_policy(tauri::ActivationPolicy::Accessory);
-
             if let Err(err) = refresh_asset_scope(&app.handle().clone()) {
                 eprintln!("Failed to refresh asset scope: {err}");
             }
@@ -2410,7 +2404,8 @@ pub fn run() {
 
             let settings = MenuItem::with_id(app, SETTINGS_MENU_ID, "设置", true, None::<&str>)?;
             let gallery = MenuItem::with_id(app, GALLERY_MENU_ID, "瀑布", true, None::<&str>)?;
-            let menu = Menu::with_items(app, &[&settings, &gallery])?;
+            let carousel = MenuItem::with_id(app, CAROUSEL_MENU_ID, "走马灯", true, None::<&str>)?;
+            let menu = Menu::with_items(app, &[&settings, &gallery, &carousel])?;
             let mut tray_builder = TrayIconBuilder::with_id("gallery")
                 .tooltip("Gallery")
                 .menu(&menu)
@@ -2420,6 +2415,7 @@ pub fn run() {
                     let label = match id {
                         SETTINGS_MENU_ID => Some(SETTINGS_LABEL),
                         GALLERY_MENU_ID => Some(GALLERY_LABEL),
+                        CAROUSEL_MENU_ID => Some(CAROUSEL_LABEL),
                         _ => None,
                     };
                     if let Some(label) = label {
@@ -2438,6 +2434,7 @@ pub fn run() {
         .invoke_handler(tauri::generate_handler![
             open_app_window,
             open_gallery_from_settings,
+            open_carousel_from_settings,
             get_settings,
             get_gallery_preferences,
             save_gallery_preferences,
@@ -2460,7 +2457,8 @@ pub fn run() {
             edit_image_with_xai,
             load_editor_session,
             save_editor_session,
-            list_images
+            list_images,
+            list_random_images
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

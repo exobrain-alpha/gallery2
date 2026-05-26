@@ -247,19 +247,37 @@ export function SettingsView() {
     }
   }
 
+  async function handleOpenCarousel() {
+    try {
+      await invoke('open_carousel_from_settings');
+    } catch (error) {
+      setStatus({ message: formatErrorMessage(error, '打开失败'), tone: 'error' });
+    }
+  }
+
   return (
     <main className="settings-shell">
       <section className="settings-panel">
         <div className="settings-header">
           <h1>设置</h1>
-          <button
-            className="secondary-button icon-button"
-            type="button"
-            onClick={handleOpenGallery}
-          >
-            <Icons.ArrowTopRight />
-            <span>打开瀑布</span>
-          </button>
+          <div className="settings-header-actions">
+            <button
+              className="secondary-button icon-button"
+              type="button"
+              onClick={handleOpenGallery}
+            >
+              <Icons.ArrowTopRight />
+              <span>打开瀑布</span>
+            </button>
+            <button
+              className="secondary-button icon-button"
+              type="button"
+              onClick={handleOpenCarousel}
+            >
+              <Icons.ArrowTopRight />
+              <span>打开走马灯</span>
+            </button>
+          </div>
         </div>
 
         <div className="settings-form">

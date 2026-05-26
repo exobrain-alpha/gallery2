@@ -94,6 +94,42 @@ pub(crate) fn list_images(
     })
 }
 
+pub(crate) fn list_random_images(
+    app: tauri::AppHandle,
+    limit: i64,
+) -> Result<Vec<ImageRecord>, String> {
+    let conn = open_db(&app)?;
+    let thumbnail_dir = configured_thumbnail_dir(&app, &conn)?;
+    fs::create_dir_all(&thumbnail_dir)
+        .map_err(|err| format!("Failed to create thumbnail directory: {err}"))?;
+    app.asset_protocol_scope()
+        .allow_directory(&thumbnail_dir, true)
+        .map_err(|err| format!("Failed to allow thumbnail directory: {err}"))?;
+    let limit = limit.clamp(1, 600);
+
+    let mut stmt = conn
+        .prepare(
+            "
+            SELECT path, media_type, width, height, modified, size
+            FROM images
+            WHERE media_type = 'image'
+            ORDER BY RANDOM()
+            LIMIT ?1
+            ",
+        )
+        .map_err(|err| format!("Failed to prepare random image query: {err}"))?;
+    let records = stmt
+        .query_map(params![limit], raw_record_from_row)
+        .map_err(|err| format!("Failed to query random images: {err}"))?
+        .collect::<Result<Vec<_>, _>>()
+        .map_err(|err| format!("Failed to collect random images: {err}"))?
+        .into_iter()
+        .map(|record| image_record_from_raw(&conn, &thumbnail_dir, record))
+        .collect();
+
+    Ok(records)
+}
+
 fn raw_record_from_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<RawImageRecord> {
     Ok(RawImageRecord {
         path: row.get(0)?,

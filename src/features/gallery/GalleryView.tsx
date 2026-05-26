@@ -11,21 +11,13 @@ import type {
   XaiEditResult,
 } from "../../types";
 import { classNames, logError, mediaName, setPageBackground, storeGalleryTheme, storedGalleryTheme } from "../../utils";
+import { buildLayout } from "./layout";
 
 const PAGE_SIZE = 50;
 const OVERSCAN = 1200;
 const MAX_REFERENCE_SELECTION = 3;
 const MAX_PLAYING_TILE_VIDEOS = 10;
 const TILE_VIDEO_PREVIEW_TIME = 0.08;
-
-interface LayoutItem {
-  column: number;
-  left: number;
-  top: number;
-  width: number;
-  height: number;
-  bottom: number;
-}
 
 interface ViewportState {
   scrollY: number;
@@ -520,48 +512,4 @@ function primeTileVideoFrame(video: HTMLVideoElement) {
   } catch (error) {
     logError(error, "Failed to seek gallery video preview frame");
   }
-}
-
-function buildLayout(records: ImageRecord[], viewportWidth: number, gapSize: number, minColumnWidth: number): LayoutItem[] {
-  const columnCount = getColumnCount(viewportWidth, gapSize, minColumnWidth);
-  const containerWidth = Math.max(1, viewportWidth - gapSize * 2);
-  const columnWidth = Math.max(1, (containerWidth - gapSize * (columnCount - 1)) / columnCount);
-  const sideOffset = gapSize;
-  const columnHeights = new Array(columnCount).fill(gapSize);
-  const layoutItems: LayoutItem[] = [];
-
-  for (let index = 0; index < records.length; index += 1) {
-    const record = records[index];
-    let shortestColumn = 0;
-    for (let column = 1; column < columnCount; column += 1) {
-      if (columnHeights[column] < columnHeights[shortestColumn]) shortestColumn = column;
-    }
-
-    const rawLeft = sideOffset + shortestColumn * (columnWidth + gapSize);
-    const rawRight = rawLeft + columnWidth;
-    const left = gapSize === 0 ? Math.round(rawLeft) : rawLeft;
-    const itemWidth = gapSize === 0 ? Math.max(1, Math.round(rawRight) - left) : columnWidth;
-    const safeHeight = Math.max(1, record.height || 1);
-    const safeWidth = Math.max(1, record.width || 1);
-    const height = Math.max(1, Math.round((itemWidth * safeHeight) / safeWidth));
-    const top = columnHeights[shortestColumn];
-    const bottom = top + height;
-
-    layoutItems[index] = {
-      column: shortestColumn,
-      left,
-      top,
-      width: itemWidth,
-      height,
-      bottom,
-    };
-    columnHeights[shortestColumn] = bottom + gapSize;
-  }
-
-  return layoutItems;
-}
-
-function getColumnCount(viewportWidth: number, gapSize: number, minColumnWidth: number) {
-  const width = Math.max(1, viewportWidth - gapSize * 2);
-  return Math.max(1, Math.floor((width + gapSize) / (minColumnWidth + gapSize)));
 }

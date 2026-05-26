@@ -4,7 +4,8 @@ use crate::{
     image_format, image_format_extension, is_supported_image, load_existing_media_records,
     media_size, move_file, normalize_path, now_nanos, now_secs, open_db, paths_overlap,
     thumbnail_cache_key, unique_destination_path, upsert_image, upsert_image_incremental,
-    visit_media, walk_media, write_image_thumbnail, DEDUPE_MAX_FILE_SIZE, GALLERY_LABEL,
+    visit_media, walk_media, write_image_thumbnail, CAROUSEL_LABEL, DEDUPE_MAX_FILE_SIZE,
+    GALLERY_LABEL,
 };
 use rusqlite::{params, Connection, OptionalExtension};
 use std::{
@@ -163,8 +164,10 @@ pub(crate) fn generate_thumbnails(app: tauri::AppHandle, progress: Arc<Mutex<Thu
 }
 
 fn reload_gallery_window(app: &tauri::AppHandle) {
-    if let Some(window) = app.get_webview_window(GALLERY_LABEL) {
-        let _ = window.eval("window.dispatchEvent(new CustomEvent('gallery:reload'))");
+    for label in [GALLERY_LABEL, CAROUSEL_LABEL] {
+        if let Some(window) = app.get_webview_window(label) {
+            let _ = window.eval("window.dispatchEvent(new CustomEvent('gallery:reload'))");
+        }
     }
 }
 
@@ -437,8 +440,10 @@ pub(crate) fn repair_image_extensions(
         })
         .map_err(|err| format!("Failed to count images: {err}"))?;
 
-    if let Some(window) = app.get_webview_window(GALLERY_LABEL) {
-        let _ = window.eval("window.location.reload()");
+    for label in [GALLERY_LABEL, CAROUSEL_LABEL] {
+        if let Some(window) = app.get_webview_window(label) {
+            let _ = window.eval("window.location.reload()");
+        }
     }
 
     Ok(ExtensionRepairSummary {
