@@ -11,11 +11,11 @@ use models::*;
 use rusqlite::{params, Connection};
 use sha2::{Digest, Sha256};
 use std::{
-    collections::HashMap,
+    collections::{HashMap, HashSet},
     env, fs,
     io::{Read, Seek, SeekFrom},
     path::{Path, PathBuf},
-    sync::{Arc, Mutex},
+    sync::{mpsc, Arc, Mutex},
     time::UNIX_EPOCH,
 };
 #[cfg(target_os = "macos")]
@@ -1399,18 +1399,66 @@ fn supported_media_type(path: &Path) -> Option<&'static str> {
     }
 }
 
-pub(crate) fn visit_media(root: &Path, skipped: &mut usize, on_media: &mut impl FnMut(PathBuf)) {
-    let Ok(entries) = fs::read_dir(root) else {
-        *skipped += 1;
-        return;
-    };
+#[cfg(target_os = "windows")]
+fn is_windows_reparse_point(path: &Path) -> bool {
+    use std::os::windows::fs::MetadataExt;
+    const FILE_ATTRIBUTE_REPARSE_POINT: u32 = 0x400;
+    fs::symlink_metadata(path)
+        .map(|metadata| metadata.file_attributes() & FILE_ATTRIBUTE_REPARSE_POINT != 0)
+        .unwrap_or(true)
+}
 
-    for entry in entries.flatten() {
-        let path = entry.path();
-        if path.is_dir() {
-            visit_media(&path, skipped, on_media);
-        } else if path.is_file() && supported_media_type(&path).is_some() {
-            on_media(path);
+#[cfg(not(target_os = "windows"))]
+fn is_windows_reparse_point(_path: &Path) -> bool {
+    false
+}
+
+fn should_descend_directory(path: &Path) -> bool {
+    fs::symlink_metadata(path)
+        .map(|metadata| !metadata.file_type().is_symlink())
+        .unwrap_or(false)
+        && !is_windows_reparse_point(path)
+}
+
+pub(crate) fn visit_media(root: &Path, skipped: &mut usize, on_media: &mut impl FnMut(PathBuf)) {
+    let mut pending = vec![root.to_path_buf()];
+    let mut visited = HashSet::new();
+
+    while let Some(directory) = pending.pop() {
+        let Ok(canonical_directory) = fs::canonicalize(&directory) else {
+            *skipped += 1;
+            continue;
+        };
+        if !visited.insert(canonical_directory) {
+            continue;
+        }
+
+        let Ok(entries) = fs::read_dir(&directory) else {
+            *skipped += 1;
+            continue;
+        };
+
+        for entry in entries {
+            let Ok(entry) = entry else {
+                *skipped += 1;
+                continue;
+            };
+            let Ok(file_type) = entry.file_type() else {
+                *skipped += 1;
+                continue;
+            };
+            let path = entry.path();
+            if file_type.is_dir() {
+                if should_descend_directory(&path) {
+                    pending.push(path);
+                } else {
+                    *skipped += 1;
+                }
+            } else if file_type.is_file() && supported_media_type(&path).is_some() {
+                on_media(path);
+            } else if file_type.is_symlink() {
+                *skipped += 1;
+            }
         }
     }
 }
@@ -1570,6 +1618,10 @@ fn replace_source_paths(conn: &mut Connection, roots: &[PathBuf]) -> Result<Vec<
     tx.commit()
         .map_err(|err| format!("Failed to commit source paths: {err}"))?;
     Ok(stored_paths)
+}
+
+fn user_path_strings(roots: &[PathBuf]) -> Vec<String> {
+    roots.iter().map(|root| user_path_string(root)).collect()
 }
 
 fn media_path_in_roots(path: &str, roots: &[PathBuf]) -> bool {
@@ -2058,13 +2110,27 @@ fn save_gallery_preferences(
 }
 
 #[tauri::command]
-fn save_source_paths(app: tauri::AppHandle, paths: Vec<String>) -> Result<Vec<String>, String> {
+fn save_source_paths(
+    app: tauri::AppHandle,
+    paths: Vec<String>,
+) -> Result<SourcePathsUpdate, String> {
     let roots = collect_roots(&paths);
     let mut conn = open_db(&app)?;
-    let stored_paths = replace_source_paths(&mut conn, &roots)?;
-    refresh_asset_scope_with_conn(&app, &conn)?;
-    start_resource_cleanup(app);
-    Ok(stored_paths)
+    let existing_paths = user_path_strings(&source_roots_from_conn(&conn)?);
+    let incoming_paths = user_path_strings(&roots);
+    let changed = incoming_paths != existing_paths;
+    let stored_paths = if changed {
+        let stored_paths = replace_source_paths(&mut conn, &roots)?;
+        refresh_asset_scope_with_conn(&app, &conn)?;
+        stored_paths
+    } else {
+        existing_paths
+    };
+
+    Ok(SourcePathsUpdate {
+        paths: stored_paths,
+        changed,
+    })
 }
 
 #[tauri::command]
@@ -2164,12 +2230,28 @@ fn get_thumbnail_progress(app: tauri::AppHandle) -> Result<ThumbnailProgress, St
         .map_err(|_| "Failed to read thumbnail progress".to_string())
 }
 
+async fn receive_dialog_result<T: Send + 'static>(
+    receiver: mpsc::Receiver<T>,
+    label: &str,
+) -> Result<T, String> {
+    let label = label.to_string();
+    let wait_label = label.clone();
+    tauri::async_runtime::spawn_blocking(move || {
+        receiver
+            .recv()
+            .map_err(|err| format!("Failed to receive {label}: {err}"))
+    })
+    .await
+    .map_err(|err| format!("Failed to wait for {wait_label}: {err}"))?
+}
+
 #[tauri::command]
 async fn pick_source_folders(app: tauri::AppHandle) -> Result<Vec<String>, String> {
-    let folders =
-        tauri::async_runtime::spawn_blocking(move || app.dialog().file().blocking_pick_folders())
-            .await
-            .map_err(|err| format!("Failed to open folder picker: {err}"))?;
+    let (sender, receiver) = mpsc::channel();
+    app.dialog().file().pick_folders(move |folders| {
+        let _ = sender.send(folders);
+    });
+    let folders = receive_dialog_result(receiver, "folder picker").await?;
 
     let mut paths = folders
         .unwrap_or_default()
@@ -2185,10 +2267,11 @@ async fn pick_source_folders(app: tauri::AppHandle) -> Result<Vec<String>, Strin
 
 #[tauri::command]
 async fn pick_duplicate_folder(app: tauri::AppHandle) -> Result<Option<String>, String> {
-    let folder =
-        tauri::async_runtime::spawn_blocking(move || app.dialog().file().blocking_pick_folder())
-            .await
-            .map_err(|err| format!("Failed to open folder picker: {err}"))?;
+    let (sender, receiver) = mpsc::channel();
+    app.dialog().file().pick_folder(move |folder| {
+        let _ = sender.send(folder);
+    });
+    let folder = receive_dialog_result(receiver, "folder picker").await?;
 
     folder
         .map(|path| {
@@ -2201,10 +2284,11 @@ async fn pick_duplicate_folder(app: tauri::AppHandle) -> Result<Option<String>, 
 
 #[tauri::command]
 async fn pick_generated_content_folder(app: tauri::AppHandle) -> Result<Option<String>, String> {
-    let folder =
-        tauri::async_runtime::spawn_blocking(move || app.dialog().file().blocking_pick_folder())
-            .await
-            .map_err(|err| format!("Failed to open folder picker: {err}"))?;
+    let (sender, receiver) = mpsc::channel();
+    app.dialog().file().pick_folder(move |folder| {
+        let _ = sender.send(folder);
+    });
+    let folder = receive_dialog_result(receiver, "folder picker").await?;
 
     folder
         .map(|path| {
@@ -2217,10 +2301,11 @@ async fn pick_generated_content_folder(app: tauri::AppHandle) -> Result<Option<S
 
 #[tauri::command]
 async fn pick_thumbnail_folder(app: tauri::AppHandle) -> Result<Option<String>, String> {
-    let folder =
-        tauri::async_runtime::spawn_blocking(move || app.dialog().file().blocking_pick_folder())
-            .await
-            .map_err(|err| format!("Failed to open folder picker: {err}"))?;
+    let (sender, receiver) = mpsc::channel();
+    app.dialog().file().pick_folder(move |folder| {
+        let _ = sender.send(folder);
+    });
+    let folder = receive_dialog_result(receiver, "folder picker").await?;
 
     folder
         .map(|path| {
@@ -2233,10 +2318,11 @@ async fn pick_thumbnail_folder(app: tauri::AppHandle) -> Result<Option<String>, 
 
 #[tauri::command]
 async fn pick_xai_reference_images(app: tauri::AppHandle) -> Result<Vec<PickedImage>, String> {
-    let files =
-        tauri::async_runtime::spawn_blocking(move || app.dialog().file().blocking_pick_files())
-            .await
-            .map_err(|err| format!("Failed to open image picker: {err}"))?;
+    let (sender, receiver) = mpsc::channel();
+    app.dialog().file().pick_files(move |files| {
+        let _ = sender.send(files);
+    });
+    let files = receive_dialog_result(receiver, "image picker").await?;
 
     files
         .unwrap_or_default()
@@ -2256,25 +2342,33 @@ async fn pick_xai_reference_images(app: tauri::AppHandle) -> Result<Vec<PickedIm
 }
 
 #[tauri::command]
-fn scan_library(app: tauri::AppHandle, paths: Vec<String>) -> Result<ScanSummary, String> {
-    scanner::scan_library(app, paths)
+async fn scan_library(app: tauri::AppHandle, paths: Vec<String>) -> Result<ScanSummary, String> {
+    tauri::async_runtime::spawn_blocking(move || scanner::scan_library(app, paths))
+        .await
+        .map_err(|err| format!("Failed to run scan: {err}"))?
 }
 
 #[tauri::command]
-fn deduplicate_resources(
+async fn deduplicate_resources(
     app: tauri::AppHandle,
     paths: Vec<String>,
     destination_path: String,
 ) -> Result<DedupeSummary, String> {
-    scanner::deduplicate_resources(app, paths, destination_path)
+    tauri::async_runtime::spawn_blocking(move || {
+        scanner::deduplicate_resources(app, paths, destination_path)
+    })
+    .await
+    .map_err(|err| format!("Failed to run duplicate detection: {err}"))?
 }
 
 #[tauri::command]
-fn repair_image_extensions(
+async fn repair_image_extensions(
     app: tauri::AppHandle,
     paths: Vec<String>,
 ) -> Result<ExtensionRepairSummary, String> {
-    scanner::repair_image_extensions(app, paths)
+    tauri::async_runtime::spawn_blocking(move || scanner::repair_image_extensions(app, paths))
+        .await
+        .map_err(|err| format!("Failed to run extension repair: {err}"))?
 }
 
 #[tauri::command]

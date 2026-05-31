@@ -16,8 +16,6 @@ use std::{
 };
 use tauri::Manager;
 
-const SCAN_PROGRESS_NOTIFY_EVERY: usize = 50;
-
 #[allow(dead_code)]
 struct ThumbnailSource {
     path: String,
@@ -30,9 +28,12 @@ pub(crate) fn scan_library(
     paths: Vec<String>,
 ) -> Result<ScanSummary, String> {
     let roots = collect_roots(&paths);
-    let conn = open_db(&app)?;
+    let mut conn = open_db(&app)?;
     let existing_records = load_existing_media_records(&conn)?;
     let updated_at = now_nanos();
+    let tx = conn
+        .transaction()
+        .map_err(|err| format!("Failed to start scan transaction: {err}"))?;
 
     let mut indexed = 0usize;
     let mut skipped = 0usize;
@@ -43,16 +44,13 @@ pub(crate) fn scan_library(
             root,
             &mut root_skipped,
             &mut |media_path| match upsert_image_incremental(
-                &conn,
+                &tx,
                 &existing_records,
                 &media_path,
                 updated_at,
             ) {
                 Ok(()) => {
                     indexed += 1;
-                    if indexed % SCAN_PROGRESS_NOTIFY_EVERY == 0 {
-                        reload_gallery_window(&app);
-                    }
                 }
                 Err(_) => failed += 1,
             },
@@ -60,13 +58,13 @@ pub(crate) fn scan_library(
         skipped += root_skipped + failed;
     }
 
-    let removed = conn
+    let removed = tx
         .execute(
             "DELETE FROM images WHERE updated_at != ?1",
             params![updated_at],
         )
         .map_err(|err| format!("Failed to remove stale images: {err}"))?;
-    conn.execute(
+    tx.execute(
         "
         DELETE FROM image_thumbnails
         WHERE NOT EXISTS (
@@ -76,11 +74,13 @@ pub(crate) fn scan_library(
         [],
     )
     .map_err(|err| format!("Failed to remove stale thumbnail records: {err}"))?;
-    let total = conn
+    let total = tx
         .query_row("SELECT COUNT(*) FROM images", [], |row| {
             row.get::<_, i64>(0)
         })
         .map_err(|err| format!("Failed to count images: {err}"))?;
+    tx.commit()
+        .map_err(|err| format!("Failed to commit scan results: {err}"))?;
     reload_gallery_window(&app);
 
     Ok(ScanSummary {

@@ -6,6 +6,7 @@ import type {
   ExtensionRepairSummary,
   ScanSummary,
   SettingsState,
+  SourcePathsUpdate,
   WindowsCloseBehavior,
 } from '../../types';
 import {
@@ -140,8 +141,8 @@ export function SettingsView() {
           closeBehavior: windowsCloseBehavior,
         })
       : windowsCloseBehavior;
-    const storedPaths = await invoke<string[]>('save_source_paths', { paths });
-    const normalizedPaths = uniquePaths(storedPaths);
+    const sourcePathsUpdate = await invoke<SourcePathsUpdate>('save_source_paths', { paths });
+    const normalizedPaths = uniquePaths(sourcePathsUpdate.paths);
     setPaths(normalizedPaths);
     setSavedPaths(normalizedPaths);
     setSavedHasGap(hasGap);
@@ -151,10 +152,14 @@ export function SettingsView() {
     setSavedGeneratedDir(generatedDir);
     setWindowsCloseBehavior(storedWindowsCloseBehavior);
     setSavedWindowsCloseBehavior(storedWindowsCloseBehavior);
-    setStatus({ message: '扫描中...', tone: '' });
-    const scanSummary = await invoke<ScanSummary>('scan_library', { paths: normalizedPaths });
-    setImageCount(scanSummary.total);
-    setStatus({ message: formatScanSummary(scanSummary), tone });
+    if (sourcePathsUpdate.changed) {
+      setStatus({ message: '扫描中...', tone: '' });
+      const scanSummary = await invoke<ScanSummary>('scan_library', { paths: normalizedPaths });
+      setImageCount(scanSummary.total);
+      setStatus({ message: formatScanSummary(scanSummary), tone });
+    } else {
+      setStatus({ message: '保存成功', tone });
+    }
   }
 
   async function handleSave() {

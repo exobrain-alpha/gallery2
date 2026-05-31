@@ -140,6 +140,13 @@ pub(crate) struct GalleryPreferences {
 
 #[derive(Debug, Serialize)]
 #[serde(rename_all = "camelCase")]
+pub(crate) struct SourcePathsUpdate {
+    pub(crate) paths: Vec<String>,
+    pub(crate) changed: bool,
+}
+
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
 pub(crate) struct ScanSummary {
     pub(crate) indexed: usize,
     pub(crate) skipped: usize,

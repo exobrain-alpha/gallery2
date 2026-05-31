@@ -44,6 +44,11 @@ export interface GalleryPreferences {
   minColumnWidth: number;
 }
 
+export interface SourcePathsUpdate {
+  paths: string[];
+  changed: boolean;
+}
+
 export interface ScanSummary {
   indexed: number;
   skipped: number;
