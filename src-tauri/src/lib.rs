@@ -1982,7 +1982,7 @@ fn apply_desktop_background_window_role(window: &WebviewWindow) -> Result<(), St
         .set_size(Size::Physical(PhysicalSize::new(width, height)))
         .map_err(|err| format!("Failed to size desktop background: {err}"))?;
 
-    apply_desktop_background_platform_role(window)
+    Ok(())
 }
 
 #[cfg(target_os = "windows")]
@@ -2079,8 +2079,6 @@ unsafe fn attach_window_to_windows_desktop(
         ) -> isize;
         fn EnumWindows(callback: Option<EnumWindowsProc>, lparam: isize) -> i32;
         fn SetParent(child: isize, parent: isize) -> isize;
-        fn GetWindowLongPtrW(hwnd: isize, index: i32) -> isize;
-        fn SetWindowLongPtrW(hwnd: isize, index: i32, new_long: isize) -> isize;
         fn ShowWindow(hwnd: isize, cmd_show: i32) -> i32;
         fn SetWindowPos(
             hwnd: isize,
@@ -2126,27 +2124,6 @@ unsafe fn attach_window_to_windows_desktop(
     const SWP_FRAMECHANGED: u32 = 0x0020;
     const SWP_SHOWWINDOW: u32 = 0x0040;
     const SW_SHOWNA: i32 = 8;
-    const GWL_STYLE: i32 = -16;
-    const GWL_EXSTYLE: i32 = -20;
-    const WS_POPUP: isize = 0x80000000u32 as isize;
-    const WS_CHILD: isize = 0x40000000;
-    const WS_CAPTION: isize = 0x00c00000;
-    const WS_THICKFRAME: isize = 0x00040000;
-    const WS_SYSMENU: isize = 0x00080000;
-    const WS_MAXIMIZEBOX: isize = 0x00010000;
-    const WS_MINIMIZEBOX: isize = 0x00020000;
-    const WS_CLIPSIBLINGS: isize = 0x04000000;
-    const WS_VISIBLE: isize = 0x10000000;
-    const WS_EX_DLGMODALFRAME: isize = 0x00000001;
-    const WS_EX_TRANSPARENT: isize = 0x00000020;
-    const WS_EX_TOOLWINDOW: isize = 0x00000080;
-    const WS_EX_WINDOWEDGE: isize = 0x00000100;
-    const WS_EX_CLIENTEDGE: isize = 0x00000200;
-    const WS_EX_STATICEDGE: isize = 0x00020000;
-    const WS_EX_APPWINDOW: isize = 0x00040000;
-    const WS_EX_LAYERED: isize = 0x00080000;
-    const WS_EX_COMPOSITED: isize = 0x02000000;
-    const WS_EX_NOACTIVATE: isize = 0x08000000;
     const HWND_TOP: isize = 0;
 
     let progman = unsafe { FindWindowW(wide_null("Progman").as_ptr(), std::ptr::null()) };
@@ -2176,33 +2153,16 @@ unsafe fn attach_window_to_windows_desktop(
             &mut search as *mut DesktopHostSearch as isize,
         )
     };
-    if search.workerw == 0 {
+    let workerw = if search.workerw != 0 {
+        search.workerw
+    } else {
+        unsafe { FindWindowExW(progman, 0, wide_null("WorkerW").as_ptr(), std::ptr::null()) }
+    };
+    if workerw == 0 {
         return Err("Failed to find Windows WorkerW wallpaper host".to_string());
     }
 
-    let style = unsafe { GetWindowLongPtrW(hwnd, GWL_STYLE) };
-    let child_style = (style
-        & !(WS_POPUP | WS_CAPTION | WS_THICKFRAME | WS_SYSMENU | WS_MAXIMIZEBOX | WS_MINIMIZEBOX))
-        | WS_CHILD
-        | WS_VISIBLE
-        | WS_CLIPSIBLINGS;
-    let _ = unsafe { SetWindowLongPtrW(hwnd, GWL_STYLE, child_style) };
-
-    let ex_style = unsafe { GetWindowLongPtrW(hwnd, GWL_EXSTYLE) };
-    let child_ex_style = (ex_style
-        & !(WS_EX_APPWINDOW
-            | WS_EX_TOOLWINDOW
-            | WS_EX_WINDOWEDGE
-            | WS_EX_CLIENTEDGE
-            | WS_EX_DLGMODALFRAME
-            | WS_EX_STATICEDGE
-            | WS_EX_LAYERED
-            | WS_EX_TRANSPARENT
-            | WS_EX_COMPOSITED))
-        | WS_EX_NOACTIVATE;
-    let _ = unsafe { SetWindowLongPtrW(hwnd, GWL_EXSTYLE, child_ex_style) };
-
-    let _ = unsafe { SetParent(hwnd, search.workerw) };
+    let _ = unsafe { SetParent(hwnd, workerw) };
 
     let width = i32::try_from(width).unwrap_or(i32::MAX);
     let height = i32::try_from(height).unwrap_or(i32::MAX);
@@ -2277,10 +2237,28 @@ fn show_desktop_background_window(app: &tauri::AppHandle) -> Result<(), String> 
     Ok(())
 }
 
+fn spawn_show_desktop_background_window(app: tauri::AppHandle) {
+    #[cfg(target_os = "windows")]
+    {
+        std::thread::spawn(move || {
+            if let Err(err) = show_desktop_background_window(&app) {
+                eprintln!("Failed to show desktop background: {err}");
+            }
+        });
+    }
+
+    #[cfg(not(target_os = "windows"))]
+    {
+        if let Err(err) = show_desktop_background_window(&app) {
+            eprintln!("Failed to show desktop background: {err}");
+        }
+    }
+}
+
 fn toggle_desktop_background_window(app: &tauri::AppHandle) -> Result<bool, String> {
     if let Some(window) = app.get_webview_window(DESKTOP_BACKGROUND_LABEL) {
         if !window.is_visible().unwrap_or(true) {
-            show_desktop_background_window(app)?;
+            spawn_show_desktop_background_window(app.clone());
             return Ok(true);
         }
 
@@ -2290,7 +2268,7 @@ fn toggle_desktop_background_window(app: &tauri::AppHandle) -> Result<bool, Stri
         return Ok(false);
     }
 
-    show_desktop_background_window(app)?;
+    spawn_show_desktop_background_window(app.clone());
     Ok(true)
 }
 
