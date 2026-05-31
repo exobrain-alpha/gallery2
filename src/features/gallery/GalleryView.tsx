@@ -142,17 +142,22 @@ export function GalleryView() {
   }, []);
 
   useEffect(() => {
+    const reloadGallery = () => {
+      reloadFirstPage().catch((error) => logError(error, "Failed to reload gallery page"));
+    };
+
+    window.addEventListener("gallery:reload", reloadGallery);
+    return () => window.removeEventListener("gallery:reload", reloadGallery);
+  }, []);
+
+  useEffect(() => {
     const reloadEmptyGallery = () => {
       if (recordsRef.current.length > 0) return;
       reloadFirstPage().catch((error) => logError(error, "Failed to reload gallery page"));
     };
 
-    window.addEventListener("gallery:reload", reloadEmptyGallery);
     const timer = window.setInterval(reloadEmptyGallery, 2000);
-    return () => {
-      window.removeEventListener("gallery:reload", reloadEmptyGallery);
-      window.clearInterval(timer);
-    };
+    return () => window.clearInterval(timer);
   }, []);
 
   useEffect(() => {

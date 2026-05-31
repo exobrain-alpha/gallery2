@@ -15,7 +15,7 @@ use std::{
     env, fs,
     io::{Read, Seek, SeekFrom},
     path::{Path, PathBuf},
-    sync::{mpsc, Arc, Mutex},
+    sync::{Arc, Mutex},
     time::UNIX_EPOCH,
 };
 #[cfg(target_os = "macos")]
@@ -1950,6 +1950,7 @@ fn attach_close_handler(window: &WebviewWindow) {
                     .message(
                         "是否退出 Gallery？选择“保留在托盘”会关闭当前窗口，应用继续在托盘栏运行。",
                     )
+                    .parent(&window_for_dialog)
                     .title("关闭窗口")
                     .kind(MessageDialogKind::Info)
                     .buttons(MessageDialogButtons::OkCancelCustom(
@@ -2230,28 +2231,18 @@ fn get_thumbnail_progress(app: tauri::AppHandle) -> Result<ThumbnailProgress, St
         .map_err(|_| "Failed to read thumbnail progress".to_string())
 }
 
-async fn receive_dialog_result<T: Send + 'static>(
-    receiver: mpsc::Receiver<T>,
-    label: &str,
-) -> Result<T, String> {
-    let label = label.to_string();
-    let wait_label = label.clone();
-    tauri::async_runtime::spawn_blocking(move || {
-        receiver
-            .recv()
-            .map_err(|err| format!("Failed to receive {label}: {err}"))
+#[tauri::command]
+async fn pick_source_folders(window: tauri::Window) -> Result<Vec<String>, String> {
+    let folders = tauri::async_runtime::spawn_blocking(move || {
+        window
+            .dialog()
+            .file()
+            .set_parent(&window)
+            .set_title("选择素材文件夹")
+            .blocking_pick_folders()
     })
     .await
-    .map_err(|err| format!("Failed to wait for {wait_label}: {err}"))?
-}
-
-#[tauri::command]
-async fn pick_source_folders(app: tauri::AppHandle) -> Result<Vec<String>, String> {
-    let (sender, receiver) = mpsc::channel();
-    app.dialog().file().pick_folders(move |folders| {
-        let _ = sender.send(folders);
-    });
-    let folders = receive_dialog_result(receiver, "folder picker").await?;
+    .map_err(|err| format!("Failed to open folder picker: {err}"))?;
 
     let mut paths = folders
         .unwrap_or_default()
@@ -2266,12 +2257,17 @@ async fn pick_source_folders(app: tauri::AppHandle) -> Result<Vec<String>, Strin
 }
 
 #[tauri::command]
-async fn pick_duplicate_folder(app: tauri::AppHandle) -> Result<Option<String>, String> {
-    let (sender, receiver) = mpsc::channel();
-    app.dialog().file().pick_folder(move |folder| {
-        let _ = sender.send(folder);
-    });
-    let folder = receive_dialog_result(receiver, "folder picker").await?;
+async fn pick_duplicate_folder(window: tauri::Window) -> Result<Option<String>, String> {
+    let folder = tauri::async_runtime::spawn_blocking(move || {
+        window
+            .dialog()
+            .file()
+            .set_parent(&window)
+            .set_title("选择重复资源保存位置")
+            .blocking_pick_folder()
+    })
+    .await
+    .map_err(|err| format!("Failed to open folder picker: {err}"))?;
 
     folder
         .map(|path| {
@@ -2283,12 +2279,17 @@ async fn pick_duplicate_folder(app: tauri::AppHandle) -> Result<Option<String>, 
 }
 
 #[tauri::command]
-async fn pick_generated_content_folder(app: tauri::AppHandle) -> Result<Option<String>, String> {
-    let (sender, receiver) = mpsc::channel();
-    app.dialog().file().pick_folder(move |folder| {
-        let _ = sender.send(folder);
-    });
-    let folder = receive_dialog_result(receiver, "folder picker").await?;
+async fn pick_generated_content_folder(window: tauri::Window) -> Result<Option<String>, String> {
+    let folder = tauri::async_runtime::spawn_blocking(move || {
+        window
+            .dialog()
+            .file()
+            .set_parent(&window)
+            .set_title("选择生成内容保存位置")
+            .blocking_pick_folder()
+    })
+    .await
+    .map_err(|err| format!("Failed to open folder picker: {err}"))?;
 
     folder
         .map(|path| {
@@ -2300,12 +2301,17 @@ async fn pick_generated_content_folder(app: tauri::AppHandle) -> Result<Option<S
 }
 
 #[tauri::command]
-async fn pick_thumbnail_folder(app: tauri::AppHandle) -> Result<Option<String>, String> {
-    let (sender, receiver) = mpsc::channel();
-    app.dialog().file().pick_folder(move |folder| {
-        let _ = sender.send(folder);
-    });
-    let folder = receive_dialog_result(receiver, "folder picker").await?;
+async fn pick_thumbnail_folder(window: tauri::Window) -> Result<Option<String>, String> {
+    let folder = tauri::async_runtime::spawn_blocking(move || {
+        window
+            .dialog()
+            .file()
+            .set_parent(&window)
+            .set_title("选择缩略图保存位置")
+            .blocking_pick_folder()
+    })
+    .await
+    .map_err(|err| format!("Failed to open folder picker: {err}"))?;
 
     folder
         .map(|path| {
@@ -2317,12 +2323,17 @@ async fn pick_thumbnail_folder(app: tauri::AppHandle) -> Result<Option<String>, 
 }
 
 #[tauri::command]
-async fn pick_xai_reference_images(app: tauri::AppHandle) -> Result<Vec<PickedImage>, String> {
-    let (sender, receiver) = mpsc::channel();
-    app.dialog().file().pick_files(move |files| {
-        let _ = sender.send(files);
-    });
-    let files = receive_dialog_result(receiver, "image picker").await?;
+async fn pick_xai_reference_images(window: tauri::Window) -> Result<Vec<PickedImage>, String> {
+    let files = tauri::async_runtime::spawn_blocking(move || {
+        window
+            .dialog()
+            .file()
+            .set_parent(&window)
+            .set_title("选择参考图片")
+            .blocking_pick_files()
+    })
+    .await
+    .map_err(|err| format!("Failed to open image picker: {err}"))?;
 
     files
         .unwrap_or_default()

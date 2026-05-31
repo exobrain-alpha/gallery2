@@ -121,30 +121,43 @@ export function SettingsView() {
   }
 
   async function saveAll(tone: StatusTone = 'ok') {
-    await invoke('save_gallery_preferences', {
-      mode: hasGap ? theme : 'none',
-      hasGap,
-      theme,
-      minColumnWidth,
-    });
-    storeGalleryTheme(theme);
-    await invoke('save_xai_settings', {
-      xaiKey,
-      generatedContentDir: generatedDir,
-    });
-    await invoke('save_thumbnail_settings', {
-      thumbnailEnabled: false,
-      thumbnailDir: '',
-    });
-    const storedWindowsCloseBehavior = isWindows
+    const galleryChanged =
+      hasGap !== savedHasGap || theme !== savedTheme || minColumnWidth !== savedMinColumnWidth;
+    const xaiChanged = xaiKey !== savedXaiKey || generatedDir !== savedGeneratedDir;
+    const closeBehaviorChanged =
+      isWindows && windowsCloseBehavior !== savedWindowsCloseBehavior;
+    const sourcePathsChanged = !pathsEqual(paths, savedPaths);
+    let normalizedPaths = paths;
+    let shouldScan = false;
+
+    if (galleryChanged) {
+      await invoke('save_gallery_preferences', {
+        mode: hasGap ? theme : 'none',
+        hasGap,
+        theme,
+        minColumnWidth,
+      });
+      storeGalleryTheme(theme);
+    }
+    if (xaiChanged) {
+      await invoke('save_xai_settings', {
+        xaiKey,
+        generatedContentDir: generatedDir,
+      });
+    }
+    const storedWindowsCloseBehavior = closeBehaviorChanged
       ? await invoke<WindowsCloseBehavior>('save_windows_close_behavior', {
           closeBehavior: windowsCloseBehavior,
         })
       : windowsCloseBehavior;
-    const sourcePathsUpdate = await invoke<SourcePathsUpdate>('save_source_paths', { paths });
-    const normalizedPaths = uniquePaths(sourcePathsUpdate.paths);
-    setPaths(normalizedPaths);
-    setSavedPaths(normalizedPaths);
+    if (sourcePathsChanged) {
+      const sourcePathsUpdate = await invoke<SourcePathsUpdate>('save_source_paths', { paths });
+      normalizedPaths = uniquePaths(sourcePathsUpdate.paths);
+      shouldScan = sourcePathsUpdate.changed;
+      setPaths(normalizedPaths);
+      setSavedPaths(normalizedPaths);
+    }
+
     setSavedHasGap(hasGap);
     setSavedTheme(theme);
     setSavedMinColumnWidth(minColumnWidth);
@@ -152,7 +165,7 @@ export function SettingsView() {
     setSavedGeneratedDir(generatedDir);
     setWindowsCloseBehavior(storedWindowsCloseBehavior);
     setSavedWindowsCloseBehavior(storedWindowsCloseBehavior);
-    if (sourcePathsUpdate.changed) {
+    if (shouldScan) {
       setStatus({ message: '扫描中...', tone: '' });
       const scanSummary = await invoke<ScanSummary>('scan_library', { paths: normalizedPaths });
       setImageCount(scanSummary.total);
