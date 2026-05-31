@@ -17,7 +17,7 @@ use std::{
     panic::{catch_unwind, AssertUnwindSafe},
     path::{Path, PathBuf},
     sync::{mpsc, Arc, Mutex},
-    time::UNIX_EPOCH,
+    time::{Duration, UNIX_EPOCH},
 };
 #[cfg(target_os = "macos")]
 use tauri::TitleBarStyle;
@@ -25,7 +25,7 @@ use tauri::{
     menu::{Menu, MenuItem},
     tray::TrayIconBuilder,
     window::Color,
-    LogicalSize, Manager, Size, Theme, WebviewUrl, WebviewWindow, WebviewWindowBuilder,
+    LogicalSize, Manager, Size, State, Theme, WebviewUrl, WebviewWindow, WebviewWindowBuilder,
     WindowEvent,
 };
 use tauri_plugin_dialog::DialogExt;
@@ -51,6 +51,7 @@ pub(crate) const THUMBNAIL_MAX_EDGE: u32 = 768;
 #[allow(dead_code)]
 pub(crate) const THUMBNAIL_QUALITY: u8 = 82;
 type ThumbnailProgressState = Arc<Mutex<ThumbnailProgress>>;
+type WindowsFullscreenRestoreState = Arc<Mutex<HashSet<String>>>;
 
 fn tray_icon() -> Option<tauri::image::Image<'static>> {
     let icon = image::load_from_memory(include_bytes!("../icons/bar-icon.png"))
@@ -1919,7 +1920,8 @@ fn show_window(app: &tauri::AppHandle, label: &str) -> Result<(), String> {
         apply_gallery_window_preferences(&window, &preferences)?;
     }
     attach_close_handler(&window);
-    attach_windows_fullscreen_handler(&window);
+    let fullscreen_restore_state = app.state::<WindowsFullscreenRestoreState>().inner().clone();
+    attach_windows_fullscreen_handler(&window, fullscreen_restore_state);
 
     bring_window_to_front(&window)?;
     Ok(())
@@ -2059,10 +2061,21 @@ fn attach_close_handler(window: &WebviewWindow) {
 }
 
 #[cfg(target_os = "windows")]
-fn attach_windows_fullscreen_handler(window: &WebviewWindow) {
+fn attach_windows_fullscreen_handler(
+    window: &WebviewWindow,
+    fullscreen_restore_state: WindowsFullscreenRestoreState,
+) {
+    let label = window.label().to_string();
     let window_for_fullscreen = window.clone();
     window.on_window_event(move |event| {
         if let WindowEvent::Resized(_) = event {
+            let is_restoring = fullscreen_restore_state
+                .lock()
+                .map(|state| state.contains(&label))
+                .unwrap_or(false);
+            if is_restoring {
+                return;
+            }
             let is_maximized = window_for_fullscreen.is_maximized().unwrap_or(false);
             let is_fullscreen = window_for_fullscreen.is_fullscreen().unwrap_or(false);
             if is_maximized && !is_fullscreen {
@@ -2073,7 +2086,10 @@ fn attach_windows_fullscreen_handler(window: &WebviewWindow) {
 }
 
 #[cfg(not(target_os = "windows"))]
-fn attach_windows_fullscreen_handler(_window: &WebviewWindow) {
+fn attach_windows_fullscreen_handler(
+    _window: &WebviewWindow,
+    _fullscreen_restore_state: WindowsFullscreenRestoreState,
+) {
 }
 
 fn bring_window_to_front(window: &WebviewWindow) -> Result<(), String> {
@@ -2090,11 +2106,23 @@ fn bring_window_to_front(window: &WebviewWindow) -> Result<(), String> {
 }
 
 #[tauri::command]
-fn set_current_window_fullscreen(window: WebviewWindow, fullscreen: bool) -> Result<(), String> {
+fn set_current_window_fullscreen(
+    window: WebviewWindow,
+    fullscreen: bool,
+    fullscreen_restore_state: State<'_, WindowsFullscreenRestoreState>,
+) -> Result<(), String> {
+    let label = window.label().to_string();
+    if !fullscreen {
+        if let Ok(mut state) = fullscreen_restore_state.lock() {
+            state.insert(label.clone());
+        }
+    }
     window
         .set_fullscreen(fullscreen)
         .map_err(|err| format!("Failed to set fullscreen: {err}"))?;
     if !fullscreen {
+        std::thread::sleep(Duration::from_millis(120));
+        let _ = window.set_decorations(true);
         let _ = window.unmaximize();
         window
             .set_size(Size::Logical(LogicalSize::new(1240.0, 860.0)))
@@ -2102,6 +2130,9 @@ fn set_current_window_fullscreen(window: WebviewWindow, fullscreen: bool) -> Res
         window
             .center()
             .map_err(|err| format!("Failed to restore window position: {err}"))?;
+        if let Ok(mut state) = fullscreen_restore_state.lock() {
+            state.remove(&label);
+        }
     }
     Ok(())
 }
@@ -2808,6 +2839,7 @@ pub fn run() {
 
     tauri::Builder::default()
         .manage(Arc::new(Mutex::new(initial_thumbnail_progress())) as ThumbnailProgressState)
+        .manage(Arc::new(Mutex::new(HashSet::<String>::new())) as WindowsFullscreenRestoreState)
         .plugin(tauri_plugin_dialog::init())
         .setup(|app| {
             if let Err(err) = refresh_asset_scope(&app.handle().clone()) {
