@@ -1,4 +1,5 @@
-import { useMemo } from "react";
+import { invoke } from "@tauri-apps/api/core";
+import { useEffect, useMemo } from "react";
 import { CarouselView } from "./features/gallery/CarouselView";
 import { GalleryView } from "./features/gallery/GalleryView";
 import { SettingsView } from "./features/settings/SettingsView";
@@ -8,6 +9,19 @@ function App() {
   const view = useMemo(() => {
     const params = new URLSearchParams(window.location.search);
     return params.get("view") || "gallery";
+  }, []);
+
+  useEffect(() => {
+    const handleKeyDown = (event: KeyboardEvent) => {
+      if (event.key !== "Escape") return;
+      event.preventDefault();
+      invoke("set_current_window_fullscreen", { fullscreen: false }).catch((error) => {
+        console.error("Failed to exit fullscreen", error);
+      });
+    };
+
+    window.addEventListener("keydown", handleKeyDown);
+    return () => window.removeEventListener("keydown", handleKeyDown);
   }, []);
 
   if (view === "settings") return <SettingsView />;

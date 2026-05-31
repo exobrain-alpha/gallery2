@@ -1918,6 +1918,7 @@ fn show_window(app: &tauri::AppHandle, label: &str) -> Result<(), String> {
         apply_gallery_window_preferences(&window, &preferences)?;
     }
     attach_close_handler(&window);
+    attach_windows_fullscreen_handler(&window);
 
     bring_window_to_front(&window)?;
     Ok(())
@@ -2056,6 +2057,24 @@ fn attach_close_handler(window: &WebviewWindow) {
     }
 }
 
+#[cfg(target_os = "windows")]
+fn attach_windows_fullscreen_handler(window: &WebviewWindow) {
+    let window_for_fullscreen = window.clone();
+    window.on_window_event(move |event| {
+        if let WindowEvent::Resized(_) = event {
+            let is_maximized = window_for_fullscreen.is_maximized().unwrap_or(false);
+            let is_fullscreen = window_for_fullscreen.is_fullscreen().unwrap_or(false);
+            if is_maximized && !is_fullscreen {
+                let _ = window_for_fullscreen.set_fullscreen(true);
+            }
+        }
+    });
+}
+
+#[cfg(not(target_os = "windows"))]
+fn attach_windows_fullscreen_handler(_window: &WebviewWindow) {
+}
+
 fn bring_window_to_front(window: &WebviewWindow) -> Result<(), String> {
     window
         .show()
@@ -2067,6 +2086,13 @@ fn bring_window_to_front(window: &WebviewWindow) -> Result<(), String> {
         .set_focus()
         .map_err(|err| format!("Failed to focus window: {err}"))?;
     Ok(())
+}
+
+#[tauri::command]
+fn set_current_window_fullscreen(window: WebviewWindow, fullscreen: bool) -> Result<(), String> {
+    window
+        .set_fullscreen(fullscreen)
+        .map_err(|err| format!("Failed to set fullscreen: {err}"))
 }
 
 #[tauri::command]
@@ -2817,6 +2843,7 @@ pub fn run() {
             open_app_window,
             open_gallery_from_settings,
             open_carousel_from_settings,
+            set_current_window_fullscreen,
             get_settings,
             get_gallery_preferences,
             save_gallery_preferences,
