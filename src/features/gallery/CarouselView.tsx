@@ -25,7 +25,11 @@ interface CarouselColumn {
 
 type PreviewState = { type: "image"; src: string; path: string } | null;
 
-export function CarouselView() {
+interface CarouselViewProps {
+  desktopBackground?: boolean;
+}
+
+export function CarouselView({ desktopBackground = false }: CarouselViewProps) {
   const [preferences, setPreferences] = useState<GalleryPreferences | null>(null);
   const initialTheme = useMemo(() => storedGalleryTheme(), []);
   const [records, setRecords] = useState<ImageRecord[]>([]);
@@ -38,6 +42,7 @@ export function CarouselView() {
 
   useEffect(() => {
     document.body.classList.add("carouseling");
+    document.body.classList.toggle("desktop-backgrounding", desktopBackground);
     setPageBackground(initialTheme === "black" ? "#1a1b1e" : "#ffffff");
     invoke<GalleryPreferences>("get_gallery_preferences")
       .then((loadedPreferences) => {
@@ -46,8 +51,11 @@ export function CarouselView() {
         setPageBackground(loadedPreferences.theme === "black" ? "#1a1b1e" : "#ffffff");
       })
       .catch((error) => logError(error, "Failed to load gallery preferences"));
-    return () => document.body.classList.remove("carouseling");
-  }, [initialTheme]);
+    return () => {
+      document.body.classList.remove("carouseling");
+      document.body.classList.remove("desktop-backgrounding");
+    };
+  }, [initialTheme, desktopBackground]);
 
   useEffect(() => {
     loadRandomImages().catch((error) => logError(error, "Failed to load carousel images"));
@@ -62,21 +70,25 @@ export function CarouselView() {
   }, []);
 
   useEffect(() => {
+    if (desktopBackground) return;
+
     document.body.classList.toggle("previewing", preview !== null);
     return () => document.body.classList.remove("previewing");
-  }, [preview]);
+  }, [preview, desktopBackground]);
 
   useEffect(() => {
     isResizingRef.current = isResizing;
   }, [isResizing]);
 
   useEffect(() => {
+    if (desktopBackground) return;
+
     const handleKeyDown = (event: KeyboardEvent) => {
       if (event.key === "Escape") setPreview(null);
     };
     window.addEventListener("keydown", handleKeyDown);
     return () => window.removeEventListener("keydown", handleKeyDown);
-  }, []);
+  }, [desktopBackground]);
 
   const gapSize = preferences?.hasGap ? 12 : 0;
   const minColumnWidth = Math.min(600, Math.max(100, preferences?.minColumnWidth || 280));
@@ -167,6 +179,7 @@ export function CarouselView() {
   }
 
   function handleColumnWheel(event: WheelEvent, columnIndex: number) {
+    if (desktopBackground) return;
     const column = columns[columnIndex];
     if (!column || column.cycleHeight <= 0) return;
     event.preventDefault();
@@ -175,11 +188,21 @@ export function CarouselView() {
   }
 
   function showPreview(record: ImageRecord) {
+    if (desktopBackground) return;
     setPreview({ type: "image", src: convertFileSrc(record.path), path: record.path });
   }
 
   if (!preferences) {
-    return <main className={`gallery-shell carousel-shell theme-${initialTheme}`} />;
+    return (
+      <main
+        className={classNames(
+          "gallery-shell",
+          "carousel-shell",
+          desktopBackground && "desktop-background-shell",
+          `theme-${initialTheme}`,
+        )}
+      />
+    );
   }
 
   const themeClass = `theme-${preferences.theme === "black" ? "black" : "white"}`;
@@ -189,13 +212,14 @@ export function CarouselView() {
       className={classNames(
         "gallery-shell",
         "carousel-shell",
+        desktopBackground && "desktop-background-shell",
         preferences.hasGap ? "gallery-gap" : "gallery-flush",
         isResizing && "is-window-resizing",
         themeClass,
       )}
       style={{ "--carousel-gap": `${gapSize}px` } as CSSProperties}
-      onDragStart={(event) => event.preventDefault()}
-      onContextMenu={(event) => event.preventDefault()}
+      onDragStart={desktopBackground ? undefined : (event) => event.preventDefault()}
+      onContextMenu={desktopBackground ? undefined : (event) => event.preventDefault()}
     >
       <section className="carousel-columns">
         {columns.map((column, columnIndex) => (
@@ -203,7 +227,7 @@ export function CarouselView() {
             className="carousel-column"
             key={columnIndex}
             style={{ width: `${columnWidth}px` }}
-            onWheel={(event) => handleColumnWheel(event, columnIndex)}
+            onWheel={desktopBackground ? undefined : (event) => handleColumnWheel(event, columnIndex)}
           >
             <div
               className="carousel-track"
@@ -221,7 +245,7 @@ export function CarouselView() {
                         width: `${columnWidth}px`,
                         height: `${column.heights[recordIndex] || 1}px`,
                       }}
-                      onClick={() => showPreview(record)}
+                      onClick={desktopBackground ? undefined : () => showPreview(record)}
                     >
                       <TileImage record={record} />
                     </div>
@@ -232,7 +256,7 @@ export function CarouselView() {
           </div>
         ))}
       </section>
-      <PreviewOverlay preview={preview} onClose={() => setPreview(null)} />
+      {desktopBackground ? null : <PreviewOverlay preview={preview} onClose={() => setPreview(null)} />}
     </main>
   );
 }

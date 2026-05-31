@@ -64,6 +64,10 @@ body.carouseling {
   overflow: hidden;
 }
 
+body.desktop-backgrounding {
+  overflow: hidden;
+}
+
 button,
 input,
 textarea,
@@ -653,6 +657,16 @@ textarea:focus {
   overflow: hidden;
 }
 
+.desktop-background-shell {
+  pointer-events: none;
+}
+
+.desktop-background-shell *,
+.desktop-background-shell *::before,
+.desktop-background-shell *::after {
+  pointer-events: none !important;
+}
+
 .carousel-columns {
   display: flex;
   gap: var(--carousel-gap, 0px);
@@ -796,6 +810,13 @@ textarea:focus {
   transform: translateZ(0) scale(1.018);
   filter: saturate(1.035) contrast(1.025);
   transition-delay: 80ms;
+}
+
+.desktop-background-shell .carousel-tile:hover img,
+.desktop-background-shell .carousel-tile:hover video {
+  transform: translateZ(0) scale(1.001);
+  filter: none;
+  transition-delay: 0ms;
 }
 
 .carousel-shell.gallery-flush .carousel-tile img,

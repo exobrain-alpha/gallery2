@@ -12,6 +12,8 @@ function App() {
   }, []);
 
   useEffect(() => {
+    if (view === "desktop") return;
+
     const handleKeyDown = (event: KeyboardEvent) => {
       if (event.key !== "Escape") return;
       event.preventDefault();
@@ -22,9 +24,10 @@ function App() {
 
     window.addEventListener("keydown", handleKeyDown);
     return () => window.removeEventListener("keydown", handleKeyDown);
-  }, []);
+  }, [view]);
 
   if (view === "settings") return <SettingsView />;
+  if (view === "desktop") return <CarouselView desktopBackground />;
   if (view === "carousel") return <CarouselView />;
   return <GalleryView />;
 }

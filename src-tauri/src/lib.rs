@@ -24,11 +24,11 @@ use std::{
 #[cfg(target_os = "macos")]
 use tauri::TitleBarStyle;
 use tauri::{
-    menu::{Menu, MenuItem},
+    menu::{Menu, MenuItem, PredefinedMenuItem},
     tray::TrayIconBuilder,
     window::Color,
-    LogicalSize, Manager, Size, State, Theme, WebviewUrl, WebviewWindow, WebviewWindowBuilder,
-    WindowEvent,
+    LogicalSize, Manager, PhysicalPosition, PhysicalSize, Position, Size, State, Theme, WebviewUrl,
+    WebviewWindow, WebviewWindowBuilder, WindowEvent,
 };
 use tauri_plugin_dialog::DialogExt;
 #[cfg(target_os = "windows")]
@@ -37,9 +37,11 @@ use tauri_plugin_dialog::{MessageDialogButtons, MessageDialogKind};
 const SETTINGS_LABEL: &str = "settings";
 pub(crate) const GALLERY_LABEL: &str = "gallery";
 pub(crate) const CAROUSEL_LABEL: &str = "carousel";
+const DESKTOP_BACKGROUND_LABEL: &str = "desktop_background";
 const SETTINGS_MENU_ID: &str = "open_settings";
 const GALLERY_MENU_ID: &str = "open_gallery";
 const CAROUSEL_MENU_ID: &str = "open_carousel";
+const DESKTOP_BACKGROUND_MENU_ID: &str = "toggle_desktop_background";
 const QUIT_MENU_ID: &str = "quit";
 pub(crate) const DEDUPE_MAX_FILE_SIZE: u64 = 100 * 1024 * 1024;
 const EDITOR_SESSION_SEGMENT_TURNS: usize = 100;
@@ -706,7 +708,7 @@ fn apply_gallery_window_preferences(
 }
 
 fn is_gallery_window(label: &str) -> bool {
-    label == GALLERY_LABEL || label == CAROUSEL_LABEL
+    label == GALLERY_LABEL || label == CAROUSEL_LABEL || label == DESKTOP_BACKGROUND_LABEL
 }
 
 impl KeepAwake {
@@ -1930,7 +1932,298 @@ pub(crate) fn upsert_image(
     )
 }
 
+fn desktop_bounds(window: &WebviewWindow) -> Result<(i32, i32, u32, u32), String> {
+    let monitors = window
+        .available_monitors()
+        .map_err(|err| format!("Failed to read desktop monitors: {err}"))?;
+    let first = monitors
+        .first()
+        .ok_or_else(|| "No monitor available for desktop background".to_string())?;
+    let mut left = first.position().x;
+    let mut top = first.position().y;
+    let mut right = first.position().x + i32::try_from(first.size().width).unwrap_or(i32::MAX);
+    let mut bottom = first.position().y + i32::try_from(first.size().height).unwrap_or(i32::MAX);
+
+    for monitor in monitors.iter().skip(1) {
+        let position = monitor.position();
+        let size = monitor.size();
+        left = left.min(position.x);
+        top = top.min(position.y);
+        right = right.max(position.x + i32::try_from(size.width).unwrap_or(i32::MAX));
+        bottom = bottom.max(position.y + i32::try_from(size.height).unwrap_or(i32::MAX));
+    }
+
+    Ok((
+        left,
+        top,
+        u32::try_from((right - left).max(1)).unwrap_or(u32::MAX),
+        u32::try_from((bottom - top).max(1)).unwrap_or(u32::MAX),
+    ))
+}
+
+fn apply_desktop_background_window_role(window: &WebviewWindow) -> Result<(), String> {
+    window
+        .set_decorations(false)
+        .map_err(|err| format!("Failed to disable desktop background decorations: {err}"))?;
+    let _ = window.set_shadow(false);
+    let _ = window.set_skip_taskbar(true);
+    let _ = window.set_focusable(false);
+    #[cfg(not(target_os = "macos"))]
+    let _ = window.set_always_on_bottom(true);
+    let _ = window.set_visible_on_all_workspaces(true);
+    let _ = window.set_ignore_cursor_events(true);
+
+    let (left, top, width, height) = desktop_bounds(window)?;
+    window
+        .set_position(Position::Physical(PhysicalPosition::new(left, top)))
+        .map_err(|err| format!("Failed to position desktop background: {err}"))?;
+    window
+        .set_size(Size::Physical(PhysicalSize::new(width, height)))
+        .map_err(|err| format!("Failed to size desktop background: {err}"))?;
+
+    apply_desktop_background_platform_role(window);
+    Ok(())
+}
+
+#[cfg(target_os = "windows")]
+fn apply_desktop_background_platform_role(window: &WebviewWindow) {
+    if let Ok(hwnd) = window.hwnd() {
+        unsafe {
+            attach_window_to_windows_desktop(hwnd.0 as isize);
+        }
+    }
+}
+
+#[cfg(target_os = "macos")]
+fn apply_desktop_background_platform_role(window: &WebviewWindow) {
+    if let Ok(ns_window) = window.ns_window() {
+        unsafe {
+            set_macos_desktop_backdrop_window_level(ns_window);
+        }
+    }
+}
+
+#[cfg(not(any(target_os = "windows", target_os = "macos")))]
+fn apply_desktop_background_platform_role(_window: &WebviewWindow) {}
+
+#[cfg(target_os = "macos")]
+unsafe fn set_macos_desktop_backdrop_window_level(ns_window: *mut std::ffi::c_void) {
+    // Keep the backdrop below Finder's desktop icons without using AppKit ordering calls.
+    const CG_DESKTOP_ICON_WINDOW_LEVEL_KEY: i32 = 18;
+    const NS_WINDOW_COLLECTION_BEHAVIOR_CAN_JOIN_ALL_SPACES: usize = 1 << 0;
+    const NS_WINDOW_COLLECTION_BEHAVIOR_STATIONARY: usize = 1 << 4;
+    const NS_WINDOW_COLLECTION_BEHAVIOR_IGNORES_CYCLE: usize = 1 << 6;
+
+    #[link(name = "ApplicationServices", kind = "framework")]
+    extern "C" {
+        fn CGWindowLevelForKey(key: i32) -> i32;
+    }
+
+    #[link(name = "objc")]
+    extern "C" {
+        fn sel_registerName(name: *const std::ffi::c_char) -> *mut std::ffi::c_void;
+        #[link_name = "objc_msgSend"]
+        fn objc_msg_send_with_isize_arg(
+            receiver: *mut std::ffi::c_void,
+            selector: *mut std::ffi::c_void,
+            arg: isize,
+        );
+    }
+
+    let backdrop_level = unsafe { CGWindowLevelForKey(CG_DESKTOP_ICON_WINDOW_LEVEL_KEY) } - 1;
+    let set_level = unsafe { sel_registerName(b"setLevel:\0".as_ptr().cast()) };
+    unsafe {
+        objc_msg_send_with_isize_arg(ns_window, set_level, backdrop_level as isize);
+    }
+
+    let behavior = NS_WINDOW_COLLECTION_BEHAVIOR_CAN_JOIN_ALL_SPACES
+        | NS_WINDOW_COLLECTION_BEHAVIOR_STATIONARY
+        | NS_WINDOW_COLLECTION_BEHAVIOR_IGNORES_CYCLE;
+    let set_collection_behavior =
+        unsafe { sel_registerName(b"setCollectionBehavior:\0".as_ptr().cast()) };
+    unsafe {
+        objc_msg_send_with_isize_arg(ns_window, set_collection_behavior, behavior as isize);
+    }
+}
+
+#[cfg(target_os = "windows")]
+unsafe fn attach_window_to_windows_desktop(hwnd: isize) {
+    type EnumWindowsProc = unsafe extern "system" fn(isize, isize) -> i32;
+
+    #[link(name = "user32")]
+    extern "system" {
+        fn FindWindowW(class_name: *const u16, window_name: *const u16) -> isize;
+        fn FindWindowExW(
+            parent: isize,
+            child_after: isize,
+            class_name: *const u16,
+            window_name: *const u16,
+        ) -> isize;
+        fn SendMessageTimeoutW(
+            hwnd: isize,
+            msg: u32,
+            wparam: usize,
+            lparam: isize,
+            flags: u32,
+            timeout: u32,
+            result: *mut usize,
+        ) -> isize;
+        fn EnumWindows(callback: Option<EnumWindowsProc>, lparam: isize) -> i32;
+        fn SetParent(child: isize, parent: isize) -> isize;
+        fn SetWindowPos(
+            hwnd: isize,
+            insert_after: isize,
+            x: i32,
+            y: i32,
+            cx: i32,
+            cy: i32,
+            flags: u32,
+        ) -> i32;
+    }
+
+    unsafe extern "system" fn find_workerw(hwnd: isize, lparam: isize) -> i32 {
+        let shell_view = unsafe {
+            FindWindowExW(
+                hwnd,
+                0,
+                wide_null("SHELLDLL_DefView").as_ptr(),
+                std::ptr::null(),
+            )
+        };
+        if shell_view != 0 {
+            let workerw =
+                unsafe { FindWindowExW(0, hwnd, wide_null("WorkerW").as_ptr(), std::ptr::null()) };
+            if workerw != 0 {
+                unsafe {
+                    *(lparam as *mut isize) = workerw;
+                }
+                return 0;
+            }
+        }
+        1
+    }
+
+    const WM_SPAWN_WORKERW: u32 = 0x052c;
+    const SMTO_NORMAL: u32 = 0;
+    const SWP_NOSIZE: u32 = 0x0001;
+    const SWP_NOMOVE: u32 = 0x0002;
+    const SWP_NOACTIVATE: u32 = 0x0010;
+    const SWP_SHOWWINDOW: u32 = 0x0040;
+    const HWND_BOTTOM: isize = 1;
+
+    let progman = unsafe { FindWindowW(wide_null("Progman").as_ptr(), std::ptr::null()) };
+    if progman == 0 {
+        return;
+    }
+
+    let mut message_result = 0usize;
+    let _ = unsafe {
+        SendMessageTimeoutW(
+            progman,
+            WM_SPAWN_WORKERW,
+            0,
+            0,
+            SMTO_NORMAL,
+            1000,
+            &mut message_result,
+        )
+    };
+
+    let mut workerw = 0isize;
+    let _ = unsafe { EnumWindows(Some(find_workerw), &mut workerw as *mut isize as isize) };
+    let parent = if workerw != 0 { workerw } else { progman };
+    let _ = unsafe { SetParent(hwnd, parent) };
+    let _ = unsafe {
+        SetWindowPos(
+            hwnd,
+            HWND_BOTTOM,
+            0,
+            0,
+            0,
+            0,
+            SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE | SWP_SHOWWINDOW,
+        )
+    };
+}
+
+#[cfg(target_os = "windows")]
+fn wide_null(value: &str) -> Vec<u16> {
+    value.encode_utf16().chain(Some(0)).collect()
+}
+
+fn show_desktop_background_window(app: &tauri::AppHandle) -> Result<(), String> {
+    if let Some(window) = app.get_webview_window(DESKTOP_BACKGROUND_LABEL) {
+        refresh_asset_scope(app)?;
+        let preferences = get_gallery_preferences_from_app(app)?;
+        apply_gallery_window_preferences(&window, &preferences)?;
+        apply_desktop_background_window_role(&window)?;
+        window
+            .show()
+            .map_err(|err| format!("Failed to show desktop background: {err}"))?;
+        apply_desktop_background_platform_role(&window);
+        return Ok(());
+    }
+
+    refresh_asset_scope(app)?;
+    let preferences = get_gallery_preferences_from_app(app)?;
+    let url = format!("index.html?view=desktop&theme={}", preferences.theme);
+    let background_color = gallery_background_color(&preferences);
+
+    let window =
+        WebviewWindowBuilder::new(app, DESKTOP_BACKGROUND_LABEL, WebviewUrl::App(url.into()))
+            .title("Desktop Background")
+            .inner_size(1240.0, 860.0)
+            .decorations(false)
+            .resizable(false)
+            .maximizable(false)
+            .minimizable(false)
+            .closable(false)
+            .skip_taskbar(true)
+            .focusable(false)
+            .always_on_bottom(!cfg!(target_os = "macos"))
+            .visible_on_all_workspaces(true)
+            .shadow(false)
+            .visible(false)
+            .background_color(background_color)
+            .theme(Some(if preferences.theme == "black" {
+                Theme::Dark
+            } else {
+                Theme::Light
+            }))
+            .build()
+            .map_err(|err| format!("Failed to build desktop background window: {err}"))?;
+
+    apply_gallery_window_preferences(&window, &preferences)?;
+    apply_desktop_background_window_role(&window)?;
+    window
+        .show()
+        .map_err(|err| format!("Failed to show desktop background: {err}"))?;
+    apply_desktop_background_platform_role(&window);
+    Ok(())
+}
+
+fn toggle_desktop_background_window(app: &tauri::AppHandle) -> Result<bool, String> {
+    if let Some(window) = app.get_webview_window(DESKTOP_BACKGROUND_LABEL) {
+        if !window.is_visible().unwrap_or(true) {
+            show_desktop_background_window(app)?;
+            return Ok(true);
+        }
+
+        window
+            .hide()
+            .map_err(|err| format!("Failed to close desktop background: {err}"))?;
+        return Ok(false);
+    }
+
+    show_desktop_background_window(app)?;
+    Ok(true)
+}
+
 fn show_window(app: &tauri::AppHandle, label: &str) -> Result<(), String> {
+    if label == DESKTOP_BACKGROUND_LABEL {
+        return Err("Desktop background can only be controlled from the tray".to_string());
+    }
+
     if let Some(window) = app.get_webview_window(label) {
         if is_gallery_window(label) {
             refresh_asset_scope(app)?;
@@ -2369,6 +2662,13 @@ fn save_gallery_preferences(
         window
             .eval("window.location.reload()")
             .map_err(|err| format!("Failed to reload carousel window: {err}"))?;
+    }
+    if let Some(window) = app.get_webview_window(DESKTOP_BACKGROUND_LABEL) {
+        apply_gallery_window_preferences(&window, &preferences)?;
+        apply_desktop_background_window_role(&window)?;
+        window
+            .eval("window.location.reload()")
+            .map_err(|err| format!("Failed to reload desktop background window: {err}"))?;
     }
 
     Ok(preferences)
@@ -2980,16 +3280,50 @@ pub fn run() {
             let settings = MenuItem::with_id(app, SETTINGS_MENU_ID, "设置", true, None::<&str>)?;
             let gallery = MenuItem::with_id(app, GALLERY_MENU_ID, "瀑布流", true, None::<&str>)?;
             let carousel = MenuItem::with_id(app, CAROUSEL_MENU_ID, "走马灯", true, None::<&str>)?;
+            let desktop_background = MenuItem::with_id(
+                app,
+                DESKTOP_BACKGROUND_MENU_ID,
+                "打开桌面背景",
+                true,
+                None::<&str>,
+            )?;
+            let desktop_background_top_separator = PredefinedMenuItem::separator(app)?;
+            let desktop_background_bottom_separator = PredefinedMenuItem::separator(app)?;
             let quit = MenuItem::with_id(app, QUIT_MENU_ID, "退出", true, None::<&str>)?;
-            let menu = Menu::with_items(app, &[&settings, &gallery, &carousel, &quit])?;
+            let menu = Menu::with_items(
+                app,
+                &[
+                    &settings,
+                    &gallery,
+                    &carousel,
+                    &desktop_background_top_separator,
+                    &desktop_background,
+                    &desktop_background_bottom_separator,
+                    &quit,
+                ],
+            )?;
+            let desktop_background_item = desktop_background.clone();
             let mut tray_builder = TrayIconBuilder::with_id("gallery")
                 .tooltip("Gallery")
                 .menu(&menu)
                 .show_menu_on_left_click(true)
-                .on_menu_event(|app, event| {
+                .on_menu_event(move |app, event| {
                     let id = event.id().as_ref();
                     if id == QUIT_MENU_ID {
                         app.exit(0);
+                        return;
+                    }
+                    if id == DESKTOP_BACKGROUND_MENU_ID {
+                        match toggle_desktop_background_window(app) {
+                            Ok(open) => {
+                                let _ = desktop_background_item.set_text(if open {
+                                    "关闭桌面背景"
+                                } else {
+                                    "打开桌面背景"
+                                });
+                            }
+                            Err(err) => eprintln!("Failed to toggle desktop background: {err}"),
+                        }
                         return;
                     }
 
