@@ -1968,7 +1968,7 @@ fn apply_desktop_background_window_role(window: &WebviewWindow) -> Result<(), St
     let _ = window.set_shadow(false);
     let _ = window.set_skip_taskbar(true);
     let _ = window.set_focusable(false);
-    #[cfg(not(target_os = "macos"))]
+    #[cfg(not(any(target_os = "macos", target_os = "windows")))]
     let _ = window.set_always_on_bottom(true);
     let _ = window.set_visible_on_all_workspaces(true);
     let _ = window.set_ignore_cursor_events(true);
@@ -1988,8 +1988,9 @@ fn apply_desktop_background_window_role(window: &WebviewWindow) -> Result<(), St
 #[cfg(target_os = "windows")]
 fn apply_desktop_background_platform_role(window: &WebviewWindow) {
     if let Ok(hwnd) = window.hwnd() {
+        let (_, _, width, height) = desktop_bounds(window).unwrap_or((0, 0, 1, 1));
         unsafe {
-            attach_window_to_windows_desktop(hwnd.0 as isize);
+            attach_window_to_windows_desktop(hwnd.0 as isize, width, height);
         }
     }
 }
@@ -2047,7 +2048,7 @@ unsafe fn set_macos_desktop_backdrop_window_level(ns_window: *mut std::ffi::c_vo
 }
 
 #[cfg(target_os = "windows")]
-unsafe fn attach_window_to_windows_desktop(hwnd: isize) {
+unsafe fn attach_window_to_windows_desktop(hwnd: isize, width: u32, height: u32) {
     type EnumWindowsProc = unsafe extern "system" fn(isize, isize) -> i32;
 
     #[link(name = "user32")]
@@ -2070,6 +2071,8 @@ unsafe fn attach_window_to_windows_desktop(hwnd: isize) {
         ) -> isize;
         fn EnumWindows(callback: Option<EnumWindowsProc>, lparam: isize) -> i32;
         fn SetParent(child: isize, parent: isize) -> isize;
+        fn GetWindowLongPtrW(hwnd: isize, index: i32) -> isize;
+        fn SetWindowLongPtrW(hwnd: isize, index: i32, new_long: isize) -> isize;
         fn SetWindowPos(
             hwnd: isize,
             insert_after: isize,
@@ -2105,10 +2108,14 @@ unsafe fn attach_window_to_windows_desktop(hwnd: isize) {
 
     const WM_SPAWN_WORKERW: u32 = 0x052c;
     const SMTO_NORMAL: u32 = 0;
-    const SWP_NOSIZE: u32 = 0x0001;
-    const SWP_NOMOVE: u32 = 0x0002;
     const SWP_NOACTIVATE: u32 = 0x0010;
+    const SWP_FRAMECHANGED: u32 = 0x0020;
     const SWP_SHOWWINDOW: u32 = 0x0040;
+    const GWL_STYLE: i32 = -16;
+    const WS_POPUP: isize = 0x80000000u32 as isize;
+    const WS_CHILD: isize = 0x40000000;
+    const WS_VISIBLE: isize = 0x10000000;
+    const HWND_TOP: isize = 0;
     const HWND_BOTTOM: isize = 1;
 
     let progman = unsafe { FindWindowW(wide_null("Progman").as_ptr(), std::ptr::null()) };
@@ -2132,16 +2139,22 @@ unsafe fn attach_window_to_windows_desktop(hwnd: isize) {
     let mut workerw = 0isize;
     let _ = unsafe { EnumWindows(Some(find_workerw), &mut workerw as *mut isize as isize) };
     let parent = if workerw != 0 { workerw } else { progman };
+
+    let style = unsafe { GetWindowLongPtrW(hwnd, GWL_STYLE) };
+    let _ =
+        unsafe { SetWindowLongPtrW(hwnd, GWL_STYLE, (style & !WS_POPUP) | WS_CHILD | WS_VISIBLE) };
     let _ = unsafe { SetParent(hwnd, parent) };
+
+    let insert_after = if workerw != 0 { HWND_TOP } else { HWND_BOTTOM };
     let _ = unsafe {
         SetWindowPos(
             hwnd,
-            HWND_BOTTOM,
+            insert_after,
             0,
             0,
-            0,
-            0,
-            SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE | SWP_SHOWWINDOW,
+            i32::try_from(width).unwrap_or(i32::MAX),
+            i32::try_from(height).unwrap_or(i32::MAX),
+            SWP_NOACTIVATE | SWP_FRAMECHANGED | SWP_SHOWWINDOW,
         )
     };
 }
@@ -2180,7 +2193,7 @@ fn show_desktop_background_window(app: &tauri::AppHandle) -> Result<(), String> 
             .closable(false)
             .skip_taskbar(true)
             .focusable(false)
-            .always_on_bottom(!cfg!(target_os = "macos"))
+            .always_on_bottom(!cfg!(any(target_os = "macos", target_os = "windows")))
             .visible_on_all_workspaces(true)
             .shadow(false)
             .visible(false)
