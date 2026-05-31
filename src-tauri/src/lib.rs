@@ -14,8 +14,9 @@ use std::{
     collections::{HashMap, HashSet},
     env, fs,
     io::{Read, Seek, SeekFrom},
+    panic::{catch_unwind, AssertUnwindSafe},
     path::{Path, PathBuf},
-    sync::{Arc, Mutex},
+    sync::{mpsc, Arc, Mutex},
     time::UNIX_EPOCH,
 };
 #[cfg(target_os = "macos")]
@@ -1912,6 +1913,47 @@ fn show_window(app: &tauri::AppHandle, label: &str) -> Result<(), String> {
     Ok(())
 }
 
+fn show_window_from_settings(app: &tauri::AppHandle, label: &str) -> Result<(), String> {
+    let settings_window = app.get_webview_window(SETTINGS_LABEL);
+    if let Some(window) = &settings_window {
+        window
+            .hide()
+            .map_err(|err| format!("Failed to hide settings window: {err}"))?;
+    }
+
+    if let Err(err) = show_window(app, label) {
+        if let Some(window) = settings_window {
+            let _ = bring_window_to_front(&window);
+        }
+        return Err(err);
+    }
+
+    Ok(())
+}
+
+async fn run_window_task(
+    app: tauri::AppHandle,
+    label: &'static str,
+    task: impl FnOnce(tauri::AppHandle) -> Result<(), String> + Send + 'static,
+) -> Result<(), String> {
+    let (sender, receiver) = mpsc::sync_channel(1);
+    let app_for_task = app.clone();
+    app.run_on_main_thread(move || {
+        let result = catch_unwind(AssertUnwindSafe(|| task(app_for_task)))
+            .unwrap_or_else(|_| Err(format!("{label} panicked")));
+        let _ = sender.send(result);
+    })
+    .map_err(|err| format!("Failed to schedule {label}: {err}"))?;
+
+    tauri::async_runtime::spawn_blocking(move || {
+        receiver
+            .recv()
+            .map_err(|err| format!("Failed to receive {label}: {err}"))?
+    })
+    .await
+    .map_err(|err| format!("Failed to wait for {label}: {err}"))?
+}
+
 fn attach_close_handler(window: &WebviewWindow) {
     #[cfg(target_os = "windows")]
     {
@@ -1997,18 +2039,24 @@ fn bring_window_to_front(window: &WebviewWindow) -> Result<(), String> {
 }
 
 #[tauri::command]
-fn open_app_window(app: tauri::AppHandle, label: String) -> Result<(), String> {
-    show_window(&app, &label)
+async fn open_app_window(app: tauri::AppHandle, label: String) -> Result<(), String> {
+    run_window_task(app, "open window", move |app| show_window(&app, &label)).await
 }
 
 #[tauri::command]
-fn open_gallery_from_settings(app: tauri::AppHandle) -> Result<(), String> {
-    show_window(&app, GALLERY_LABEL)
+async fn open_gallery_from_settings(app: tauri::AppHandle) -> Result<(), String> {
+    run_window_task(app, "open gallery from settings", move |app| {
+        show_window_from_settings(&app, GALLERY_LABEL)
+    })
+    .await
 }
 
 #[tauri::command]
-fn open_carousel_from_settings(app: tauri::AppHandle) -> Result<(), String> {
-    show_window(&app, CAROUSEL_LABEL)
+async fn open_carousel_from_settings(app: tauri::AppHandle) -> Result<(), String> {
+    run_window_task(app, "open carousel from settings", move |app| {
+        show_window_from_settings(&app, CAROUSEL_LABEL)
+    })
+    .await
 }
 
 #[tauri::command]

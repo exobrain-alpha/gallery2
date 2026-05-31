@@ -1,5 +1,4 @@
 import { invoke } from '@tauri-apps/api/core';
-import { getCurrentWindow } from '@tauri-apps/api/window';
 import { useEffect, useMemo, useState } from 'react';
 import { Icons } from '../../icons';
 import type {
@@ -292,7 +291,6 @@ export function SettingsView() {
     setOpeningWindow('gallery');
     try {
       await invoke('open_gallery_from_settings');
-      hideSettingsWindow();
     } catch (error) {
       setStatus({ message: formatErrorMessage(error, '打开失败'), tone: 'error' });
     } finally {
@@ -305,22 +303,11 @@ export function SettingsView() {
     setOpeningWindow('carousel');
     try {
       await invoke('open_carousel_from_settings');
-      hideSettingsWindow();
     } catch (error) {
       setStatus({ message: formatErrorMessage(error, '打开失败'), tone: 'error' });
     } finally {
       setOpeningWindow(null);
     }
-  }
-
-  function hideSettingsWindow() {
-    window.setTimeout(() => {
-      getCurrentWindow()
-        .hide()
-        .catch((error) =>
-          setStatus({ message: formatErrorMessage(error, '隐藏失败'), tone: 'error' })
-        );
-    }, 0);
   }
 
   return (

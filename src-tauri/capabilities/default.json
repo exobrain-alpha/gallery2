@@ -4,7 +4,6 @@
   "description": "Capability for gallery windows",
   "windows": ["settings", "gallery", "carousel"],
   "permissions": [
-    "core:default",
-    "core:window:allow-hide"
+    "core:default"
   ]
 }
