@@ -37,7 +37,7 @@ use tauri_plugin_dialog::{MessageDialogButtons, MessageDialogKind};
 const SETTINGS_LABEL: &str = "settings";
 pub(crate) const GALLERY_LABEL: &str = "gallery";
 pub(crate) const CAROUSEL_LABEL: &str = "carousel";
-const DESKTOP_BACKGROUND_LABEL: &str = "desktop_background";
+pub(crate) const DESKTOP_BACKGROUND_LABEL: &str = "desktop_background";
 const SETTINGS_MENU_ID: &str = "open_settings";
 const GALLERY_MENU_ID: &str = "open_gallery";
 const CAROUSEL_MENU_ID: &str = "open_carousel";

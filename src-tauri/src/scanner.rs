@@ -5,7 +5,7 @@ use crate::{
     media_size, move_file, normalize_path, now_nanos, now_secs, open_db, paths_overlap,
     thumbnail_cache_key, unique_destination_path, upsert_image, upsert_image_incremental,
     visit_media, walk_media, write_image_thumbnail, CAROUSEL_LABEL, DEDUPE_MAX_FILE_SIZE,
-    GALLERY_LABEL,
+    DESKTOP_BACKGROUND_LABEL, GALLERY_LABEL,
 };
 use rusqlite::{params, Connection, OptionalExtension};
 use std::{
@@ -164,7 +164,7 @@ pub(crate) fn generate_thumbnails(app: tauri::AppHandle, progress: Arc<Mutex<Thu
 }
 
 fn reload_gallery_window(app: &tauri::AppHandle) {
-    for label in [GALLERY_LABEL, CAROUSEL_LABEL] {
+    for label in [GALLERY_LABEL, CAROUSEL_LABEL, DESKTOP_BACKGROUND_LABEL] {
         if let Some(window) = app.get_webview_window(label) {
             let _ = window.eval("window.dispatchEvent(new CustomEvent('gallery:reload'))");
         }
