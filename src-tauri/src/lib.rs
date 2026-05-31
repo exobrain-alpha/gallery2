@@ -2021,10 +2021,23 @@ fn attach_close_handler(window: &WebviewWindow) {
                         {
                             eprintln!("Failed to persist Windows close behavior: {err}");
                         }
+                        let app_for_action = app.clone();
+                        let fallback_window = window_for_action.clone();
+                        let fallback_app = app.clone();
                         if should_exit {
-                            app.exit(0);
+                            if let Err(err) = app.run_on_main_thread(move || {
+                                app_for_action.exit(0);
+                            }) {
+                                eprintln!("Failed to schedule app exit: {err}");
+                                fallback_app.exit(0);
+                            }
                         } else {
-                            let _ = window_for_action.hide();
+                            if let Err(err) = app.run_on_main_thread(move || {
+                                let _ = window_for_action.hide();
+                            }) {
+                                eprintln!("Failed to schedule window hide: {err}");
+                                let _ = fallback_window.hide();
+                            }
                         }
                     });
             }

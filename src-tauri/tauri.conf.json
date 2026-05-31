@@ -40,6 +40,7 @@
       "nsis": {
         "template": "nsis/installer.nsi",
         "installerIcon": "icons/icon.ico",
+        "uninstallerIcon": "icons/icon.ico",
         "languages": [
           "SimpChinese"
         ],

@@ -343,7 +343,6 @@ Function PageLeaveReinstall
   ${EndIf}
 
   reinst_uninstall:
-    HideWindow
     ClearErrors
 
     ${If} $WixMode = 1
