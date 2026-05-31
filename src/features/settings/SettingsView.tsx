@@ -1,4 +1,5 @@
 import { invoke } from '@tauri-apps/api/core';
+import { getCurrentWindow } from '@tauri-apps/api/window';
 import { useEffect, useMemo, useState } from 'react';
 import { Icons } from '../../icons';
 import type {
@@ -22,6 +23,7 @@ import {
 
 type StatusTone = '' | 'ok' | 'error';
 type TaskName = 'scan' | 'dedupe' | 'repair';
+type OpenTarget = 'gallery' | 'carousel';
 
 interface StatusState {
   message: string;
@@ -55,6 +57,7 @@ export function SettingsView() {
     useState<WindowsCloseBehavior>('ask');
   const [status, setStatus] = useState<StatusState>({ message: '', tone: '' });
   const [runningTask, setRunningTask] = useState<TaskName | null>(null);
+  const [openingWindow, setOpeningWindow] = useState<OpenTarget | null>(null);
   const [pickingGeneratedDir, setPickingGeneratedDir] = useState(false);
   const [addingPaths, setAddingPaths] = useState(false);
   const isWindows = platform === 'windows';
@@ -285,19 +288,39 @@ export function SettingsView() {
   }
 
   async function handleOpenGallery() {
+    if (openingWindow) return;
+    setOpeningWindow('gallery');
     try {
       await invoke('open_gallery_from_settings');
+      hideSettingsWindow();
     } catch (error) {
       setStatus({ message: formatErrorMessage(error, '打开失败'), tone: 'error' });
+    } finally {
+      setOpeningWindow(null);
     }
   }
 
   async function handleOpenCarousel() {
+    if (openingWindow) return;
+    setOpeningWindow('carousel');
     try {
       await invoke('open_carousel_from_settings');
+      hideSettingsWindow();
     } catch (error) {
       setStatus({ message: formatErrorMessage(error, '打开失败'), tone: 'error' });
+    } finally {
+      setOpeningWindow(null);
     }
+  }
+
+  function hideSettingsWindow() {
+    window.setTimeout(() => {
+      getCurrentWindow()
+        .hide()
+        .catch((error) =>
+          setStatus({ message: formatErrorMessage(error, '隐藏失败'), tone: 'error' })
+        );
+    }, 0);
   }
 
   return (
@@ -309,6 +332,7 @@ export function SettingsView() {
             <button
               className="secondary-button icon-button"
               type="button"
+              disabled={openingWindow !== null}
               onClick={handleOpenGallery}
             >
               <Icons.ArrowTopRight />
@@ -317,6 +341,7 @@ export function SettingsView() {
             <button
               className="secondary-button icon-button"
               type="button"
+              disabled={openingWindow !== null}
               onClick={handleOpenCarousel}
             >
               <Icons.ArrowTopRight />

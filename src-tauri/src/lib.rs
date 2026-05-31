@@ -2003,24 +2003,12 @@ fn open_app_window(app: tauri::AppHandle, label: String) -> Result<(), String> {
 
 #[tauri::command]
 fn open_gallery_from_settings(app: tauri::AppHandle) -> Result<(), String> {
-    show_window(&app, GALLERY_LABEL)?;
-    if let Some(window) = app.get_webview_window(SETTINGS_LABEL) {
-        window
-            .hide()
-            .map_err(|err| format!("Failed to hide settings window: {err}"))?;
-    }
-    Ok(())
+    show_window(&app, GALLERY_LABEL)
 }
 
 #[tauri::command]
 fn open_carousel_from_settings(app: tauri::AppHandle) -> Result<(), String> {
-    show_window(&app, CAROUSEL_LABEL)?;
-    if let Some(window) = app.get_webview_window(SETTINGS_LABEL) {
-        window
-            .hide()
-            .map_err(|err| format!("Failed to hide settings window: {err}"))?;
-    }
-    Ok(())
+    show_window(&app, CAROUSEL_LABEL)
 }
 
 #[tauri::command]
