@@ -25,7 +25,8 @@ use tauri::{
     menu::{Menu, MenuItem},
     tray::TrayIconBuilder,
     window::Color,
-    Manager, Theme, WebviewUrl, WebviewWindow, WebviewWindowBuilder, WindowEvent,
+    LogicalSize, Manager, Size, Theme, WebviewUrl, WebviewWindow, WebviewWindowBuilder,
+    WindowEvent,
 };
 use tauri_plugin_dialog::DialogExt;
 #[cfg(target_os = "windows")]
@@ -2065,6 +2066,7 @@ fn attach_windows_fullscreen_handler(window: &WebviewWindow) {
             let is_maximized = window_for_fullscreen.is_maximized().unwrap_or(false);
             let is_fullscreen = window_for_fullscreen.is_fullscreen().unwrap_or(false);
             if is_maximized && !is_fullscreen {
+                let _ = window_for_fullscreen.unmaximize();
                 let _ = window_for_fullscreen.set_fullscreen(true);
             }
         }
@@ -2092,7 +2094,17 @@ fn bring_window_to_front(window: &WebviewWindow) -> Result<(), String> {
 fn set_current_window_fullscreen(window: WebviewWindow, fullscreen: bool) -> Result<(), String> {
     window
         .set_fullscreen(fullscreen)
-        .map_err(|err| format!("Failed to set fullscreen: {err}"))
+        .map_err(|err| format!("Failed to set fullscreen: {err}"))?;
+    if !fullscreen {
+        let _ = window.unmaximize();
+        window
+            .set_size(Size::Logical(LogicalSize::new(1240.0, 860.0)))
+            .map_err(|err| format!("Failed to restore window size: {err}"))?;
+        window
+            .center()
+            .map_err(|err| format!("Failed to restore window position: {err}"))?;
+    }
+    Ok(())
 }
 
 #[tauri::command]

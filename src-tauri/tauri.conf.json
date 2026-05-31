@@ -53,7 +53,9 @@
         "displayLanguageSelector": false
       },
       "wix": {
-        "language": "zh-CN"
+        "language": "zh-CN",
+        "bannerPath": "wix/banner.bmp",
+        "dialogImagePath": "wix/dialog.bmp"
       }
     },
     "icon": [
