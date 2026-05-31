@@ -2066,7 +2066,6 @@ fn attach_windows_fullscreen_handler(window: &WebviewWindow) {
             let is_maximized = window_for_fullscreen.is_maximized().unwrap_or(false);
             let is_fullscreen = window_for_fullscreen.is_fullscreen().unwrap_or(false);
             if is_maximized && !is_fullscreen {
-                let _ = window_for_fullscreen.unmaximize();
                 let _ = window_for_fullscreen.set_fullscreen(true);
             }
         }
