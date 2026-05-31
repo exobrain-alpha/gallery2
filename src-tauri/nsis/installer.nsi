@@ -87,6 +87,14 @@ VIAddVersionKey "LegalCopyright" "${COPYRIGHT}"
 VIAddVersionKey "FileVersion" "${VERSION}"
 VIAddVersionKey "ProductVersion" "${VERSION}"
 
+; Executable resource icons
+!if "${INSTALLERICON}" != ""
+  Icon "${INSTALLERICON}"
+!endif
+!if "${UNINSTALLERICON}" != ""
+  UninstallIcon "${UNINSTALLERICON}"
+!endif
+
 # additional plugins
 !addplugindir "${ADDITIONALPLUGINSPATH}"
 
@@ -347,15 +355,25 @@ Function PageLeaveReinstall
 
     ${If} $WixMode = 1
       ReadRegStr $R1 HKLM "$R6" "UninstallString"
-      ExecWait '$R1' $0
     ${Else}
       ReadRegStr $4 SHCTX "${MANUPRODUCTKEY}" ""
       ReadRegStr $R1 SHCTX "${UNINSTKEY}" "UninstallString"
       ${IfThen} $UpdateMode = 1 ${|} StrCpy $R1 "$R1 /UPDATE" ${|} ; append /UPDATE
       ${IfThen} $PassiveMode = 1 ${|} StrCpy $R1 "$R1 /P" ${|} ; append /P
       StrCpy $R1 "$R1 _?=$4" ; append uninstall directory
-      ExecWait '$R1' $0
     ${EndIf}
+
+    ${If} $ReinstallUninstallOnly = 1
+      Exec '$R1'
+      ${If} ${Errors}
+        MessageBox MB_ICONEXCLAMATION "$(unableToUninstall)"
+        Abort
+      ${EndIf}
+      Quit
+    ${EndIf}
+
+    HideWindow
+    ExecWait '$R1' $0
 
     BringToFront
 
@@ -379,9 +397,6 @@ Function PageLeaveReinstall
       Abort
     ${EndIf}
 
-    ${If} $ReinstallUninstallOnly = 1
-      Quit
-    ${EndIf}
   reinst_done:
 FunctionEnd
 
