@@ -84,6 +84,10 @@ export interface XaiEditResult {
   response: unknown;
 }
 
+export interface XaiKeyStatus {
+  configured: boolean;
+}
+
 export interface Attachment {
   path: string;
   label: string;

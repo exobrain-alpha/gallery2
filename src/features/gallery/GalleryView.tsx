@@ -9,6 +9,7 @@ import type {
   ImageRecord,
   PickedImage,
   XaiEditResult,
+  XaiKeyStatus,
 } from "../../types";
 import { classNames, logError, setPageBackground, storeGalleryTheme, storedGalleryTheme } from "../../utils";
 import { buildLayout } from "./layout";
@@ -412,6 +413,7 @@ export function GalleryView() {
       <EditorDrawer
         ref={editorRef}
         readImageDataUri={(path) => invoke("read_image_data_uri", { path })}
+        getXaiKeyStatus={() => invoke<XaiKeyStatus>("get_xai_key_status")}
         pickReferenceImages={() => invoke<PickedImage[]>("pick_xai_reference_images")}
         editImage={(payload) => invoke<XaiEditResult>("edit_image_with_xai", payload)}
         onPreviewAttachment={(attachment) => setPreview({ type: "image", src: attachment.dataUrl || convertFileSrc(attachment.path), path: attachment.path })}

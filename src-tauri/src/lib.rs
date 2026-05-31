@@ -27,6 +27,8 @@ use tauri::{
     Manager, Theme, WebviewUrl, WebviewWindow, WebviewWindowBuilder, WindowEvent,
 };
 use tauri_plugin_dialog::DialogExt;
+#[cfg(target_os = "windows")]
+use tauri_plugin_dialog::{MessageDialogButtons, MessageDialogKind};
 
 const SETTINGS_LABEL: &str = "settings";
 pub(crate) const GALLERY_LABEL: &str = "gallery";
@@ -126,6 +128,36 @@ pub(crate) fn app_data_dir(app: &tauri::AppHandle) -> Result<PathBuf, String> {
     Ok(dir)
 }
 
+fn user_path_string(path: &Path) -> String {
+    clean_windows_verbatim_path(&path.to_string_lossy())
+}
+
+fn user_path_buf(path: PathBuf) -> PathBuf {
+    PathBuf::from(user_path_string(&path))
+}
+
+fn canonical_user_path(path: &Path) -> Result<PathBuf, String> {
+    fs::canonicalize(path)
+        .map(user_path_buf)
+        .map_err(|err| format!("Failed to canonicalize path {}: {err}", path.display()))
+}
+
+#[cfg(target_os = "windows")]
+fn clean_windows_verbatim_path(path: &str) -> String {
+    if let Some(rest) = path.strip_prefix("\\\\?\\UNC\\") {
+        format!("\\\\{rest}")
+    } else if let Some(rest) = path.strip_prefix("\\\\?\\") {
+        rest.to_string()
+    } else {
+        path.to_string()
+    }
+}
+
+#[cfg(not(target_os = "windows"))]
+fn clean_windows_verbatim_path(path: &str) -> String {
+    path.to_string()
+}
+
 fn editor_sessions_dir(app: &tauri::AppHandle) -> Result<PathBuf, String> {
     let dir = app_data_dir(app)?.join("editor-sessions");
     fs::create_dir_all(&dir)
@@ -198,24 +230,27 @@ pub(crate) fn configured_generated_content_dir(
     app: &tauri::AppHandle,
     conn: &Connection,
 ) -> Result<PathBuf, String> {
-    let app_dir = fs::canonicalize(app_data_dir(app)?)
-        .map_err(|err| format!("Failed to canonicalize app data directory: {err}"))?;
+    let app_dir = canonical_user_path(&app_data_dir(app)?)?;
     let default_dir = default_generated_content_dir(app)?;
     let stored = read_config(
         conn,
         "generated_content_dir",
-        &default_dir.to_string_lossy(),
+        &user_path_string(&default_dir),
     )?;
     let dir = PathBuf::from(stored);
     let points_to_app_dir = dir == app_dir
-        || fs::canonicalize(&dir)
+        || canonical_user_path(&dir)
             .ok()
             .is_some_and(|canonical| canonical == app_dir);
-    let normalized_dir = if points_to_app_dir { default_dir } else { dir };
+    let normalized_dir = if points_to_app_dir {
+        default_dir
+    } else {
+        user_path_buf(dir)
+    };
     write_config(
         conn,
         "generated_content_dir",
-        &normalized_dir.to_string_lossy(),
+        &user_path_string(&normalized_dir),
     )?;
     Ok(normalized_dir)
 }
@@ -225,8 +260,10 @@ pub(crate) fn configured_thumbnail_dir(
     conn: &Connection,
 ) -> Result<PathBuf, String> {
     let default_dir = default_thumbnail_dir(app)?;
-    let stored = read_config(conn, "thumbnail_dir", &default_dir.to_string_lossy())?;
-    Ok(PathBuf::from(stored))
+    let stored = read_config(conn, "thumbnail_dir", &user_path_string(&default_dir))?;
+    let dir = user_path_buf(PathBuf::from(stored));
+    write_config(conn, "thumbnail_dir", &user_path_string(&dir))?;
+    Ok(dir)
 }
 
 pub(crate) fn thumbnail_enabled(conn: &Connection) -> Result<bool, String> {
@@ -243,7 +280,7 @@ fn source_roots_from_conn(conn: &Connection) -> Result<Vec<PathBuf>, String> {
         .collect::<Result<Vec<_>, _>>()
         .map_err(|err| format!("Failed to collect source paths: {err}"))?
         .into_iter()
-        .map(PathBuf::from)
+        .map(|path| user_path_buf(PathBuf::from(path)))
         .collect();
     Ok(roots)
 }
@@ -1261,7 +1298,7 @@ fn save_generated_image_bytes(
     let target = unique_destination_path(&dir, &candidate);
     fs::write(&target, bytes).map_err(|err| format!("Failed to save generated image: {err}"))?;
     Ok(SavedGeneratedImage {
-        path: target.to_string_lossy().into_owned(),
+        path: user_path_string(&target),
     })
 }
 
@@ -1452,7 +1489,7 @@ pub(crate) fn normalize_path(path: &str) -> Option<PathBuf> {
     if trimmed.is_empty() {
         return None;
     }
-    fs::canonicalize(trimmed).ok()
+    fs::canonicalize(trimmed).ok().map(user_path_buf)
 }
 
 pub(crate) fn collect_roots(paths: &[String]) -> Vec<PathBuf> {
@@ -1481,13 +1518,13 @@ fn replace_source_paths(conn: &mut Connection, roots: &[PathBuf]) -> Result<Vec<
 
     let mut stored_paths = Vec::with_capacity(roots.len());
     for root in roots {
-        let path = root.to_string_lossy().into_owned();
+        let path = user_path_string(root);
         tx.execute(
             "INSERT INTO source_paths (path, created_at) VALUES (?1, ?2)",
             params![path, updated_at],
         )
         .map_err(|err| format!("Failed to save source path: {err}"))?;
-        stored_paths.push(root.to_string_lossy().into_owned());
+        stored_paths.push(user_path_string(root));
     }
 
     tx.commit()
@@ -1604,7 +1641,7 @@ fn upsert_image_with_metadata(
             updated_at = excluded.updated_at
         ",
         params![
-            media_path.to_string_lossy(),
+            user_path_string(media_path),
             metadata.media_type.as_str(),
             metadata.width,
             metadata.height,
@@ -1636,7 +1673,7 @@ pub(crate) fn upsert_image_incremental(
     let media_type = supported_media_type(media_path)
         .ok_or_else(|| format!("Unsupported media type for {}", media_path.display()))?;
     let (modified, size) = metadata_secs(media_path)?;
-    let path = media_path.to_string_lossy().into_owned();
+    let path = user_path_string(media_path);
     if let Some(existing) = existing_records.get(&path) {
         if existing.media_type == media_type
             && existing.modified == modified
@@ -1777,16 +1814,66 @@ fn show_window(app: &tauri::AppHandle, label: &str) -> Result<(), String> {
     if let Some(preferences) = &gallery_preferences {
         apply_gallery_window_preferences(&window, &preferences)?;
     }
-    let window_to_hide = window.clone();
-    window.on_window_event(move |event| {
-        if let WindowEvent::CloseRequested { api, .. } = event {
-            api.prevent_close();
-            let _ = window_to_hide.hide();
-        }
-    });
+    attach_close_handler(&window);
 
     bring_window_to_front(&window)?;
     Ok(())
+}
+
+fn attach_close_handler(window: &WebviewWindow) {
+    #[cfg(target_os = "windows")]
+    {
+        let window_for_close = window.clone();
+        let prompt_open = Arc::new(Mutex::new(false));
+        window.on_window_event(move |event| {
+            if let WindowEvent::CloseRequested { api, .. } = event {
+                api.prevent_close();
+                let Ok(mut is_prompt_open) = prompt_open.lock() else {
+                    return;
+                };
+                if *is_prompt_open {
+                    return;
+                }
+                *is_prompt_open = true;
+                drop(is_prompt_open);
+
+                let app = window_for_close.app_handle().clone();
+                let window_for_dialog = window_for_close.clone();
+                let window_for_action = window_for_close.clone();
+                let prompt_open_after_close = Arc::clone(&prompt_open);
+                window_for_dialog
+                    .dialog()
+                    .message("是否退出 Gallery？选择“保留在托盘”会关闭当前窗口，应用继续在托盘栏运行。")
+                    .title("关闭窗口")
+                    .kind(MessageDialogKind::Info)
+                    .buttons(MessageDialogButtons::OkCancelCustom(
+                        "退出应用".to_string(),
+                        "保留在托盘".to_string(),
+                    ))
+                    .show(move |should_exit| {
+                        if let Ok(mut is_prompt_open) = prompt_open_after_close.lock() {
+                            *is_prompt_open = false;
+                        }
+                        if should_exit {
+                            app.exit(0);
+                        } else {
+                            let _ = window_for_action.hide();
+                        }
+                    });
+            }
+        });
+    }
+
+    #[cfg(not(target_os = "windows"))]
+    {
+        let window_to_hide = window.clone();
+        window.on_window_event(move |event| {
+            if let WindowEvent::CloseRequested { api, .. } = event {
+                api.prevent_close();
+                let _ = window_to_hide.hide();
+            }
+        });
+    }
 }
 
 fn bring_window_to_front(window: &WebviewWindow) -> Result<(), String> {
@@ -1839,7 +1926,10 @@ fn get_settings(app: tauri::AppHandle) -> Result<SettingsState, String> {
         .query_map([], |row| row.get::<_, String>(0))
         .map_err(|err| format!("Failed to query source paths: {err}"))?
         .collect::<Result<Vec<_>, _>>()
-        .map_err(|err| format!("Failed to collect source paths: {err}"))?;
+        .map_err(|err| format!("Failed to collect source paths: {err}"))?
+        .into_iter()
+        .map(|path| user_path_string(&PathBuf::from(path)))
+        .collect();
     let image_count = conn
         .query_row("SELECT COUNT(*) FROM images", [], |row| {
             row.get::<_, i64>(0)
@@ -1850,14 +1940,10 @@ fn get_settings(app: tauri::AppHandle) -> Result<SettingsState, String> {
     Ok(SettingsState {
         paths,
         image_count,
-        db_path: db_path(&app)?.to_string_lossy().into_owned(),
-        generated_content_dir: configured_generated_content_dir(&app, &conn)?
-            .to_string_lossy()
-            .into_owned(),
+        db_path: user_path_string(&db_path(&app)?),
+        generated_content_dir: user_path_string(&configured_generated_content_dir(&app, &conn)?),
         thumbnail_enabled: thumbnail_enabled(&conn)?,
-        thumbnail_dir: configured_thumbnail_dir(&app, &conn)?
-            .to_string_lossy()
-            .into_owned(),
+        thumbnail_dir: user_path_string(&configured_thumbnail_dir(&app, &conn)?),
         xai_key: read_xai_key_config(&app, &conn)?,
         gallery_mode: normalize_gallery_mode(read_config(&conn, "gallery_mode", "")?, &preferences),
         gallery_has_gap: preferences.has_gap,
@@ -1932,8 +2018,7 @@ fn save_xai_settings(
     generated_content_dir: String,
 ) -> Result<(), String> {
     let conn = open_db(&app)?;
-    let app_dir = fs::canonicalize(app_data_dir(&app)?)
-        .map_err(|err| format!("Failed to canonicalize app data directory: {err}"))?;
+    let app_dir = canonical_user_path(&app_data_dir(&app)?)?;
     let default_dir = default_generated_content_dir(&app)?;
     let dir = if generated_content_dir.trim().is_empty() {
         default_dir
@@ -1942,19 +2027,28 @@ fn save_xai_settings(
     };
     fs::create_dir_all(&dir)
         .map_err(|err| format!("Failed to create generated content directory: {err}"))?;
-    let mut dir = fs::canonicalize(&dir)
+    let mut dir = canonical_user_path(&dir)
         .map_err(|err| format!("Failed to canonicalize generated content directory: {err}"))?;
     if dir == app_dir {
         dir = default_generated_content_dir(&app)?;
         fs::create_dir_all(&dir)
             .map_err(|err| format!("Failed to create generated content directory: {err}"))?;
-        dir = fs::canonicalize(&dir)
+        dir = canonical_user_path(&dir)
             .map_err(|err| format!("Failed to canonicalize generated content directory: {err}"))?;
     }
     write_xai_key_config(&app, &conn, &xai_key)?;
-    write_config(&conn, "generated_content_dir", &dir.to_string_lossy())?;
+    write_config(&conn, "generated_content_dir", &user_path_string(&dir))?;
     refresh_asset_scope_with_conn(&app, &conn)?;
     Ok(())
+}
+
+#[tauri::command]
+fn get_xai_key_status(app: tauri::AppHandle) -> Result<XaiKeyStatus, String> {
+    let conn = open_db(&app)?;
+    let xai_key = read_xai_key_config(&app, &conn)?;
+    Ok(XaiKeyStatus {
+        configured: !xai_key.trim().is_empty(),
+    })
 }
 
 #[tauri::command]
@@ -1977,14 +2071,14 @@ fn save_thumbnail_settings(
     };
     fs::create_dir_all(&dir)
         .map_err(|err| format!("Failed to create thumbnail directory: {err}"))?;
-    let dir = fs::canonicalize(&dir)
+    let dir = canonical_user_path(&dir)
         .map_err(|err| format!("Failed to canonicalize thumbnail directory: {err}"))?;
     write_config(
         &conn,
         "thumbnail_enabled",
         if thumbnail_enabled { "true" } else { "false" },
     )?;
-    write_config(&conn, "thumbnail_dir", &dir.to_string_lossy())?;
+    write_config(&conn, "thumbnail_dir", &user_path_string(&dir))?;
     refresh_asset_scope_with_conn(&app, &conn)?;
     Ok(())
 }
@@ -2015,7 +2109,7 @@ async fn pick_source_folders(app: tauri::AppHandle) -> Result<Vec<String>, Strin
         .into_iter()
         .filter_map(|path| path.into_path().ok())
         .filter(|path| path.is_dir())
-        .map(|path| path.to_string_lossy().into_owned())
+        .map(|path| user_path_string(&path))
         .collect::<Vec<_>>();
     paths.sort();
     paths.dedup();
@@ -2032,7 +2126,7 @@ async fn pick_duplicate_folder(app: tauri::AppHandle) -> Result<Option<String>, 
     folder
         .map(|path| {
             path.into_path()
-                .map(|path| path.to_string_lossy().into_owned())
+                .map(|path| user_path_string(&path))
                 .map_err(|err| format!("Failed to resolve duplicate folder: {err}"))
         })
         .transpose()
@@ -2048,7 +2142,7 @@ async fn pick_generated_content_folder(app: tauri::AppHandle) -> Result<Option<S
     folder
         .map(|path| {
             path.into_path()
-                .map(|path| path.to_string_lossy().into_owned())
+                .map(|path| user_path_string(&path))
                 .map_err(|err| format!("Failed to resolve generated content folder: {err}"))
         })
         .transpose()
@@ -2064,7 +2158,7 @@ async fn pick_thumbnail_folder(app: tauri::AppHandle) -> Result<Option<String>, 
     folder
         .map(|path| {
             path.into_path()
-                .map(|path| path.to_string_lossy().into_owned())
+                .map(|path| user_path_string(&path))
                 .map_err(|err| format!("Failed to resolve thumbnail folder: {err}"))
         })
         .transpose()
@@ -2084,9 +2178,10 @@ async fn pick_xai_reference_images(app: tauri::AppHandle) -> Result<Vec<PickedIm
         .filter_map(|path| path.into_path().ok())
         .filter(|path| path.is_file() && is_supported_image(path))
         .map(|path| {
-            let data_uri = read_image_data_uri(path.to_string_lossy().into_owned())?;
+            let path = user_path_buf(path);
+            let data_uri = read_image_data_uri(user_path_string(&path))?;
             Ok(PickedImage {
-                path: path.to_string_lossy().into_owned(),
+                path: user_path_string(&path),
                 data_uri,
             })
         })
@@ -2149,7 +2244,7 @@ fn save_generated_image(
     let target = unique_destination_path(&dir, &candidate);
     fs::write(&target, bytes).map_err(|err| format!("Failed to save generated image: {err}"))?;
     Ok(SavedGeneratedImage {
-        path: target.to_string_lossy().into_owned(),
+        path: user_path_string(&target),
     })
 }
 
@@ -2491,6 +2586,7 @@ pub fn run() {
             save_gallery_preferences,
             save_source_paths,
             save_xai_settings,
+            get_xai_key_status,
             save_thumbnail_settings,
             start_thumbnail_generation,
             get_thumbnail_progress,

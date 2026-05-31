@@ -124,6 +124,12 @@ pub(crate) struct XaiEditResult {
 
 #[derive(Debug, Serialize)]
 #[serde(rename_all = "camelCase")]
+pub(crate) struct XaiKeyStatus {
+    pub(crate) configured: bool,
+}
+
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
 pub(crate) struct GalleryPreferences {
     pub(crate) has_gap: bool,
     pub(crate) theme: String,

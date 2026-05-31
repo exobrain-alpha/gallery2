@@ -10,13 +10,14 @@ import {
   type MouseEvent,
 } from "react";
 import { Icons } from "../../icons";
-import type { Attachment, ImageRecord, PickedImage, XaiEditResult } from "../../types";
-import { classNames, formatErrorMessage, mediaName } from "../../utils";
+import type { Attachment, ImageRecord, PickedImage, XaiEditResult, XaiKeyStatus } from "../../types";
+import { classNames, formatErrorMessage, mediaName, rawErrorMessage } from "../../utils";
 
 const MAX_REFERENCES = 3;
 const DRAWER_ANIMATION_MS = 420;
 const COPY_FEEDBACK_MS = 1100;
 const RETRY_FEEDBACK_MS = 520;
+const NOTICE_OK_MS = 1600;
 const IMAGE_COUNT_VALUES = [1, 2, 3, 4];
 const SESSION_SAVE_DEBOUNCE_MS = 260;
 const BOTTOM_STICK_THRESHOLD = 80;
@@ -64,6 +65,11 @@ interface RunPromptOptions {
   clearComposer: boolean;
 }
 
+interface EditorNoticeState {
+  message: string;
+  tone: "ok" | "error" | "";
+}
+
 export interface EditorDrawerHandle {
   open: (record: ImageRecord | ImageRecord[]) => Promise<void>;
   close: () => void;
@@ -72,6 +78,7 @@ export interface EditorDrawerHandle {
 
 interface EditorDrawerProps {
   readImageDataUri: (path: string) => Promise<string>;
+  getXaiKeyStatus: () => Promise<XaiKeyStatus>;
   pickReferenceImages: () => Promise<PickedImage[]>;
   editImage: (payload: {
     sourcePaths: string[];
@@ -87,7 +94,7 @@ interface EditorDrawerProps {
 }
 
 export const EditorDrawer = forwardRef<EditorDrawerHandle, EditorDrawerProps>(function EditorDrawer(
-  { readImageDataUri, pickReferenceImages, editImage, onPreviewAttachment, onToggle, onError },
+  { readImageDataUri, getXaiKeyStatus, pickReferenceImages, editImage, onPreviewAttachment, onToggle, onError },
   ref,
 ) {
   const [open, setOpen] = useState(false);
@@ -99,6 +106,8 @@ export const EditorDrawer = forwardRef<EditorDrawerHandle, EditorDrawerProps>(fu
   const [composerText, setComposerText] = useState("");
   const [selectedAttachments, setSelectedAttachments] = useState<Attachment[]>([]);
   const [messages, setMessages] = useState<Message[]>([]);
+  const [notice, setNotice] = useState<EditorNoticeState>({ message: "", tone: "" });
+  const [xaiKeyConfigured, setXaiKeyConfigured] = useState<boolean | null>(null);
   const [actionFeedback, setActionFeedback] = useState<Record<string, string>>({});
   const [sessionId, setSessionId] = useState("");
   const [sessionLoaded, setSessionLoaded] = useState(false);
@@ -107,6 +116,7 @@ export const EditorDrawer = forwardRef<EditorDrawerHandle, EditorDrawerProps>(fu
   const closeTimerRef = useRef<number>(0);
   const focusTimerRef = useRef<number>(0);
   const saveTimerRef = useRef<number>(0);
+  const noticeTimerRef = useRef<number>(0);
   const sessionTokenRef = useRef(0);
   const messagesStateRef = useRef<Message[]>([]);
   const shouldStickToBottomRef = useRef(true);
@@ -143,6 +153,7 @@ export const EditorDrawer = forwardRef<EditorDrawerHandle, EditorDrawerProps>(fu
       if (closeTimerRef.current) window.clearTimeout(closeTimerRef.current);
       if (focusTimerRef.current) window.clearTimeout(focusTimerRef.current);
       if (saveTimerRef.current) window.clearTimeout(saveTimerRef.current);
+      if (noticeTimerRef.current) window.clearTimeout(noticeTimerRef.current);
     };
   }, []);
 
@@ -177,11 +188,17 @@ export const EditorDrawer = forwardRef<EditorDrawerHandle, EditorDrawerProps>(fu
     setImageCount(1);
     setComposerText("");
     setSelectedAttachments(attachments);
+    setNotice({ message: "", tone: "" });
+    setXaiKeyConfigured(null);
     setActionFeedback({});
     window.requestAnimationFrame(() => {
       setOpen(true);
       onToggle(true);
       focusComposer();
+      checkXaiKeyStatusForNotice().catch((error) => {
+        showNotice(formatErrorMessage(error, "API Key 检查失败"), "error");
+        onError(error, "API Key 检查失败");
+      });
     });
   }
 
@@ -197,6 +214,8 @@ export const EditorDrawer = forwardRef<EditorDrawerHandle, EditorDrawerProps>(fu
       setImageCount(1);
       setComposerText("");
       setSelectedAttachments([]);
+      setNotice({ message: "", tone: "" });
+      setXaiKeyConfigured(null);
       setActionFeedback({});
     }, DRAWER_ANIMATION_MS);
   }
@@ -271,13 +290,82 @@ export const EditorDrawer = forwardRef<EditorDrawerHandle, EditorDrawerProps>(fu
   function submitPrompt() {
     const prompt = composerText.trim();
     if (!open || pending || !prompt || !selectedAttachments.length) return Promise.resolve();
-    return runPrompt({
+    return ensureXaiKeyReady().then((ready) => {
+      if (!ready) return;
+      return runPrompt({
+        prompt,
+        attachments: selectedAttachments,
+        aspectRatio,
+        resolution,
+        imageCount,
+        clearComposer: true,
+      });
+    });
+  }
+
+  async function ensureXaiKeyReady() {
+    if (xaiKeyConfigured === true) return true;
+    try {
+      const status = await checkXaiKeyStatusForNotice();
+      return status.configured;
+    } catch (error) {
+      showNotice(formatErrorMessage(error, "API Key 检查失败"), "error");
+      throw error;
+    }
+  }
+
+  async function checkXaiKeyStatusForNotice() {
+    const status = await getXaiKeyStatus();
+    setXaiKeyConfigured(status.configured);
+    if (status.configured) {
+      showNotice("API Key 已就绪", "ok", NOTICE_OK_MS);
+    } else {
+      showNotice("请先设置 xAI API Key", "error");
+    }
+    return status;
+  }
+
+  function showNotice(message: string, tone: EditorNoticeState["tone"], duration = 0) {
+    if (noticeTimerRef.current) window.clearTimeout(noticeTimerRef.current);
+    setNotice({ message, tone });
+    if (duration > 0) {
+      noticeTimerRef.current = window.setTimeout(() => {
+        setNotice((current) => (current.message === message ? { message: "", tone: "" } : current));
+      }, duration);
+    }
+  }
+
+  function clearNotice() {
+    if (noticeTimerRef.current) window.clearTimeout(noticeTimerRef.current);
+    setNotice({ message: "", tone: "" });
+  }
+
+  function notifyXaiKeyError(error: unknown) {
+    const message = formatErrorMessage(error, "生成失败");
+    if (isXaiKeyStatusError(error)) {
+      setXaiKeyConfigured(false);
+      showNotice(message, "error");
+    }
+  }
+
+  function submitPromptFromMessage({
       prompt,
-      attachments: selectedAttachments,
+      attachments,
       aspectRatio,
       resolution,
       imageCount,
-      clearComposer: true,
+      clearComposer,
+    }: RunPromptOptions) {
+    return ensureXaiKeyReady().then((ready) => {
+      if (!ready) return;
+      return runPrompt({
+        prompt,
+        attachments,
+        aspectRatio,
+        resolution,
+        imageCount,
+        clearComposer,
+      });
     });
   }
 
@@ -290,7 +378,7 @@ export const EditorDrawer = forwardRef<EditorDrawerHandle, EditorDrawerProps>(fu
     setAspectRatio(nextAspect);
     setResolution(nextResolution);
     setImageCount(nextCount);
-    await runPrompt({
+    await submitPromptFromMessage({
       prompt: message.content,
       attachments: message.attachments,
       aspectRatio: nextAspect,
@@ -303,16 +391,18 @@ export const EditorDrawer = forwardRef<EditorDrawerHandle, EditorDrawerProps>(fu
   async function runPrompt({ prompt, attachments, aspectRatio, resolution, imageCount, clearComposer }: RunPromptOptions) {
     const userAttachments = attachments.map((item) => ({ ...item }));
     const normalizedImageCount = normalizeImageCount(imageCount);
+    const userMessage = createMessage("user", prompt, userAttachments, {
+      aspectRatio,
+      resolution,
+      imageCount: normalizedImageCount,
+    });
     const pendingMessage = createMessage("assistant", "", [], { pending: true });
 
+    clearNotice();
     setSelectedAttachments(userAttachments.map((item) => ({ ...item })));
     setMessages((current) => [
       ...current,
-      createMessage("user", prompt, userAttachments, {
-        aspectRatio,
-        resolution,
-        imageCount: normalizedImageCount,
-      }),
+      userMessage,
       pendingMessage,
     ]);
     setPending(true);
@@ -341,6 +431,14 @@ export const EditorDrawer = forwardRef<EditorDrawerHandle, EditorDrawerProps>(fu
       setSelectedAttachments(outputAttachments.slice(0, MAX_REFERENCES));
       setPending(false);
     } catch (error) {
+      if (isXaiKeyStatusError(error)) {
+        setMessages((current) => current.filter((item) => (
+          item.id !== userMessage.id && item.id !== pendingMessage.id
+        )));
+        setPending(false);
+        notifyXaiKeyError(error);
+        throw error;
+      }
       setMessages((current) => current.map((item) => (
         item.id === pendingMessage.id
           ? createMessage("assistant", formatErrorMessage(error, "生成失败"), [], { tone: "error" })
@@ -386,6 +484,7 @@ export const EditorDrawer = forwardRef<EditorDrawerHandle, EditorDrawerProps>(fu
       <button className="editor-drawer-backdrop" type="button" aria-label="关闭" onClick={closeDrawer} />
       <aside className="editor-drawer-panel" role="dialog" aria-modal="true" aria-label="编辑">
         <div className="editor-drawer-shell">
+          <EditorNotice notice={notice} />
           <section className="editor-messages" ref={messagesRef} aria-live="polite" onScroll={handleMessagesScroll}>
             {messages.map((message) => (
               <MessageView
@@ -507,6 +606,15 @@ async function persistSession(sessionId: string, messages: Message[]) {
     sessionId,
     messages: serializeMessages(messages),
   });
+}
+
+function EditorNotice({ notice }: { notice: EditorNoticeState }) {
+  if (!notice.message) return null;
+  return (
+    <div className="editor-notice" data-tone={notice.tone} role="status" aria-live="polite">
+      {notice.message}
+    </div>
+  );
 }
 
 function MessageView({
@@ -727,7 +835,12 @@ function toggleAttachment(current: Attachment[], attachment: Attachment) {
 }
 
 function isXaiImageInput(value: string) {
-  return /^data:image\/[a-z0-9.+-]+;base64,/iu.test(value) || /^https?:\/\//iu.test(value);
+  return /^data:image\/[a-z0-9.+-]+;base64,/iu.test(value) || /^https:\/\//iu.test(value);
+}
+
+function isXaiKeyStatusError(error: unknown) {
+  const message = rawErrorMessage(error);
+  return /xai\s*key|api\s*key|key\s*(未设置|无效|失效|missing|empty|invalid|expired)/iu.test(message);
 }
 
 function resizeTextarea(element: HTMLTextAreaElement | null) {

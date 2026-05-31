@@ -7,6 +7,7 @@
     "dev": "vite",
     "dev:app": "cargo tauri dev",
     "build": "tsc && vite build",
+    "build:app": "cargo tauri build",
     "preview": "vite preview",
     "tauri": "tauri"
   },
