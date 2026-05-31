@@ -5,6 +5,7 @@ import type { GalleryPreferences, ImageRecord } from "../../types";
 import { classNames, logError, setPageBackground, storeGalleryTheme, storedGalleryTheme } from "../../utils";
 import { getColumnCount, getColumnWidth, getItemHeight } from "./layout";
 import { PreviewImage, TileImage } from "./MediaTile";
+import { useDebouncedWindowSize } from "./useWindowViewport";
 
 const RANDOM_IMAGE_LIMIT = 360;
 const AUTO_SCROLL_SPEED = 22;
@@ -14,11 +15,6 @@ const WHEEL_SCROLL_FACTOR = 0.65;
 const MAX_WHEEL_DELTA = 120;
 const RESUME_DELAY_MS = 1400;
 const WHEEL_LINE_HEIGHT = 16;
-
-interface ViewportState {
-  width: number;
-  height: number;
-}
 
 interface CarouselColumn {
   records: ImageRecord[];
@@ -34,13 +30,11 @@ export function CarouselView() {
   const initialTheme = useMemo(() => storedGalleryTheme(), []);
   const [records, setRecords] = useState<ImageRecord[]>([]);
   const [preview, setPreview] = useState<PreviewState>(null);
-  const [viewport, setViewport] = useState<ViewportState>(() => ({
-    width: window.innerWidth,
-    height: window.innerHeight,
-  }));
+  const { size: viewport, isResizing } = useDebouncedWindowSize();
   const trackRefs = useRef<Array<HTMLDivElement | null>>([]);
   const offsetsRef = useRef<number[]>([]);
   const pauseUntilRefs = useRef<number[]>([]);
+  const isResizingRef = useRef(isResizing);
 
   useEffect(() => {
     document.body.classList.add("carouseling");
@@ -54,26 +48,6 @@ export function CarouselView() {
       .catch((error) => logError(error, "Failed to load gallery preferences"));
     return () => document.body.classList.remove("carouseling");
   }, [initialTheme]);
-
-  useEffect(() => {
-    let frame = 0;
-    const updateViewport = () => {
-      if (frame) return;
-      frame = window.requestAnimationFrame(() => {
-        frame = 0;
-        setViewport({
-          width: window.innerWidth,
-          height: window.innerHeight,
-        });
-      });
-    };
-
-    window.addEventListener("resize", updateViewport, { passive: true });
-    return () => {
-      if (frame) window.cancelAnimationFrame(frame);
-      window.removeEventListener("resize", updateViewport);
-    };
-  }, []);
 
   useEffect(() => {
     loadRandomImages().catch((error) => logError(error, "Failed to load carousel images"));
@@ -91,6 +65,10 @@ export function CarouselView() {
     document.body.classList.toggle("previewing", preview !== null);
     return () => document.body.classList.remove("previewing");
   }, [preview]);
+
+  useEffect(() => {
+    isResizingRef.current = isResizing;
+  }, [isResizing]);
 
   useEffect(() => {
     const handleKeyDown = (event: KeyboardEvent) => {
@@ -127,6 +105,11 @@ export function CarouselView() {
     const animate = (time: number) => {
       const deltaSeconds = Math.min(0.05, Math.max(0, (time - previousTime) / 1000));
       previousTime = time;
+
+      if (isResizingRef.current) {
+        animationFrame = window.requestAnimationFrame(animate);
+        return;
+      }
 
       for (let index = 0; index < columns.length; index += 1) {
         const column = columns[index];
@@ -207,6 +190,7 @@ export function CarouselView() {
         "gallery-shell",
         "carousel-shell",
         preferences.hasGap ? "gallery-gap" : "gallery-flush",
+        isResizing && "is-window-resizing",
         themeClass,
       )}
       style={{ "--carousel-gap": `${gapSize}px` } as CSSProperties}

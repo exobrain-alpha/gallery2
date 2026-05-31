@@ -14,18 +14,13 @@ import type {
 import { classNames, logError, setPageBackground, storeGalleryTheme, storedGalleryTheme } from "../../utils";
 import { buildLayout } from "./layout";
 import { MediaPlaceholder, PreviewImage, TileImage } from "./MediaTile";
+import { useGalleryViewport } from "./useWindowViewport";
 
 const PAGE_SIZE = 50;
 const OVERSCAN = 1200;
 const MAX_REFERENCE_SELECTION = 3;
 const MAX_PLAYING_TILE_VIDEOS = 10;
 const TILE_VIDEO_PREVIEW_TIME = 0.08;
-
-interface ViewportState {
-  scrollY: number;
-  width: number;
-  height: number;
-}
 
 type PreviewState =
   | { type: "image"; src: string; path?: string }
@@ -43,11 +38,7 @@ export function GalleryView() {
   const initialTheme = useMemo(() => storedGalleryTheme(), []);
   const [records, setRecords] = useState<ImageRecord[]>([]);
   const [done, setDone] = useState(false);
-  const [viewport, setViewport] = useState<ViewportState>(() => ({
-    scrollY: window.scrollY,
-    width: window.innerWidth,
-    height: window.innerHeight,
-  }));
+  const { viewport, isResizing } = useGalleryViewport();
   const [preview, setPreview] = useState<PreviewState>(null);
   const [contextMenu, setContextMenu] = useState<ContextMenuState | null>(null);
   const [selectedReferenceRecords, setSelectedReferenceRecords] = useState<ImageRecord[]>([]);
@@ -70,29 +61,6 @@ export function GalleryView() {
       })
       .catch((error) => logError(error, "Failed to load gallery preferences"));
   }, [initialTheme]);
-
-  useEffect(() => {
-    let frame = 0;
-    const updateViewport = () => {
-      if (frame) return;
-      frame = window.requestAnimationFrame(() => {
-        frame = 0;
-        setViewport({
-          scrollY: window.scrollY,
-          width: window.innerWidth,
-          height: window.innerHeight,
-        });
-      });
-    };
-
-    window.addEventListener("scroll", updateViewport, { passive: true });
-    window.addEventListener("resize", updateViewport, { passive: true });
-    return () => {
-      if (frame) window.cancelAnimationFrame(frame);
-      window.removeEventListener("scroll", updateViewport);
-      window.removeEventListener("resize", updateViewport);
-    };
-  }, []);
 
   useEffect(() => {
     document.body.classList.toggle("previewing", preview !== null);
@@ -342,6 +310,7 @@ export function GalleryView() {
       className={classNames(
         "gallery-shell",
         preferences.hasGap ? "gallery-gap" : "gallery-flush",
+        isResizing && "is-window-resizing",
         themeClass,
       )}
       onDragStart={(event) => {
@@ -385,13 +354,16 @@ export function GalleryView() {
           );
         })}
       </section>
-      <div className="gallery-spacer" hidden={records.length > 0} />
       <div
         ref={sentinelRef}
         id="sentinel"
         aria-hidden="true"
-        hidden={done}
-        style={{ height: done ? "1px" : `${Math.max(1, Math.min(240, viewport.height * 0.25))}px` }}
+        hidden={done || records.length === 0}
+        style={{
+          height: done || records.length === 0
+            ? "1px"
+            : `${Math.max(1, Math.min(240, viewport.height * 0.25))}px`,
+        }}
       />
 
       <PreviewOverlay preview={preview} onClose={() => setPreview(null)} />

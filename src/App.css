@@ -770,6 +770,15 @@ textarea:focus {
   filter: saturate(1.06) contrast(1.04);
 }
 
+.gallery-shell.is-window-resizing .image-tile {
+  pointer-events: none;
+}
+
+.gallery-shell.is-window-resizing .image-tile img,
+.gallery-shell.is-window-resizing .image-tile video {
+  transition: none;
+}
+
 .carousel-tile img,
 .carousel-tile video {
   transform: translateZ(0) scale(1.001);
@@ -876,10 +885,6 @@ textarea:focus {
 
 .video-tile-kind-mark svg {
   transform: translateX(0.5px);
-}
-
-.gallery-spacer {
-  min-height: 100vh;
 }
 
 #sentinel {

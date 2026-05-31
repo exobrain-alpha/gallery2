@@ -10,6 +10,8 @@ use image::{codecs::jpeg::JpegEncoder, ImageFormat, ImageReader};
 use models::*;
 use rusqlite::{params, Connection};
 use sha2::{Digest, Sha256};
+#[cfg(target_os = "macos")]
+use std::process::{Child, Command, Stdio};
 use std::{
     collections::{HashMap, HashSet},
     env, fs,
@@ -52,6 +54,15 @@ pub(crate) const THUMBNAIL_MAX_EDGE: u32 = 768;
 pub(crate) const THUMBNAIL_QUALITY: u8 = 82;
 type ThumbnailProgressState = Arc<Mutex<ThumbnailProgress>>;
 type WindowsFullscreenRestoreState = Arc<Mutex<HashSet<String>>>;
+type KeepAwakeState = Arc<Mutex<KeepAwake>>;
+
+#[derive(Default)]
+struct KeepAwake {
+    #[cfg(target_os = "macos")]
+    caffeinate: Option<Child>,
+    #[cfg(target_os = "windows")]
+    active: bool,
+}
 
 fn tray_icon() -> Option<tauri::image::Image<'static>> {
     let icon = image::load_from_memory(include_bytes!("../icons/bar-icon.png"))
@@ -696,6 +707,79 @@ fn apply_gallery_window_preferences(
 
 fn is_gallery_window(label: &str) -> bool {
     label == GALLERY_LABEL || label == CAROUSEL_LABEL
+}
+
+impl KeepAwake {
+    fn set_active(&mut self, active: bool) -> Result<(), String> {
+        self.set_platform_active(active)
+    }
+
+    #[cfg(target_os = "macos")]
+    fn set_platform_active(&mut self, active: bool) -> Result<(), String> {
+        if active {
+            let needs_spawn = match self.caffeinate.as_mut() {
+                Some(child) => child
+                    .try_wait()
+                    .map_err(|err| format!("Failed to check caffeinate state: {err}"))?
+                    .is_some(),
+                None => true,
+            };
+            if !needs_spawn {
+                return Ok(());
+            }
+
+            let pid = std::process::id().to_string();
+            let child = Command::new("/usr/bin/caffeinate")
+                .args(["-d", "-i", "-u", "-t", "86400", "-w", &pid])
+                .stdin(Stdio::null())
+                .stdout(Stdio::null())
+                .stderr(Stdio::null())
+                .spawn()
+                .map_err(|err| format!("Failed to start caffeinate: {err}"))?;
+            self.caffeinate = Some(child);
+            return Ok(());
+        }
+
+        if let Some(mut child) = self.caffeinate.take() {
+            let _ = child.kill();
+            let _ = child.wait();
+        }
+        Ok(())
+    }
+
+    #[cfg(target_os = "windows")]
+    fn set_platform_active(&mut self, active: bool) -> Result<(), String> {
+        if self.active == active {
+            return Ok(());
+        }
+
+        const ES_CONTINUOUS: u32 = 0x8000_0000;
+        const ES_SYSTEM_REQUIRED: u32 = 0x0000_0001;
+        const ES_DISPLAY_REQUIRED: u32 = 0x0000_0002;
+
+        #[link(name = "kernel32")]
+        extern "system" {
+            fn SetThreadExecutionState(es_flags: u32) -> u32;
+        }
+
+        let flags = if active {
+            ES_CONTINUOUS | ES_SYSTEM_REQUIRED | ES_DISPLAY_REQUIRED
+        } else {
+            ES_CONTINUOUS
+        };
+        let result = unsafe { SetThreadExecutionState(flags) };
+        if result == 0 {
+            return Err("Failed to update execution state".to_string());
+        }
+
+        self.active = active;
+        Ok(())
+    }
+
+    #[cfg(not(any(target_os = "macos", target_os = "windows")))]
+    fn set_platform_active(&mut self, _active: bool) -> Result<(), String> {
+        Ok(())
+    }
 }
 
 fn now_secs() -> i64 {
@@ -1858,6 +1942,8 @@ fn show_window(app: &tauri::AppHandle, label: &str) -> Result<(), String> {
                 .map_err(|err| format!("Failed to reload settings window: {err}"))?;
         }
         bring_window_to_front(&window)?;
+        let keep_awake_state = app.state::<KeepAwakeState>().inner().clone();
+        update_carousel_keep_awake(&window, &keep_awake_state);
         return Ok(());
     }
 
@@ -1921,7 +2007,10 @@ fn show_window(app: &tauri::AppHandle, label: &str) -> Result<(), String> {
     }
     attach_close_handler(&window);
     let fullscreen_restore_state = app.state::<WindowsFullscreenRestoreState>().inner().clone();
-    attach_windows_fullscreen_handler(&window, fullscreen_restore_state);
+    let keep_awake_state = app.state::<KeepAwakeState>().inner().clone();
+    attach_windows_fullscreen_handler(&window, fullscreen_restore_state, keep_awake_state.clone());
+    attach_carousel_keep_awake_handler(&window, keep_awake_state.clone());
+    update_carousel_keep_awake(&window, &keep_awake_state);
 
     bring_window_to_front(&window)?;
     Ok(())
@@ -2064,6 +2153,7 @@ fn attach_close_handler(window: &WebviewWindow) {
 fn attach_windows_fullscreen_handler(
     window: &WebviewWindow,
     fullscreen_restore_state: WindowsFullscreenRestoreState,
+    keep_awake_state: KeepAwakeState,
 ) {
     let label = window.label().to_string();
     let window_for_fullscreen = window.clone();
@@ -2080,6 +2170,9 @@ fn attach_windows_fullscreen_handler(
             let is_fullscreen = window_for_fullscreen.is_fullscreen().unwrap_or(false);
             if is_maximized && !is_fullscreen {
                 let _ = window_for_fullscreen.set_fullscreen(true);
+                if label == CAROUSEL_LABEL {
+                    set_carousel_keep_awake_active(&keep_awake_state, true);
+                }
             }
         }
     });
@@ -2089,7 +2182,38 @@ fn attach_windows_fullscreen_handler(
 fn attach_windows_fullscreen_handler(
     _window: &WebviewWindow,
     _fullscreen_restore_state: WindowsFullscreenRestoreState,
+    _keep_awake_state: KeepAwakeState,
 ) {
+}
+
+fn update_carousel_keep_awake(window: &WebviewWindow, keep_awake_state: &KeepAwakeState) {
+    let active = window.label() == CAROUSEL_LABEL && window.is_fullscreen().unwrap_or(false);
+    set_carousel_keep_awake_active(keep_awake_state, active);
+}
+
+fn set_carousel_keep_awake_active(keep_awake_state: &KeepAwakeState, active: bool) {
+    if let Ok(mut keep_awake) = keep_awake_state.lock() {
+        if let Err(err) = keep_awake.set_active(active) {
+            eprintln!("Failed to update keep-awake state: {err}");
+        }
+    }
+}
+
+fn attach_carousel_keep_awake_handler(window: &WebviewWindow, keep_awake_state: KeepAwakeState) {
+    if window.label() != CAROUSEL_LABEL {
+        return;
+    }
+
+    let window_for_event = window.clone();
+    window.on_window_event(move |event| match event {
+        WindowEvent::Resized(_) => {
+            update_carousel_keep_awake(&window_for_event, &keep_awake_state);
+        }
+        WindowEvent::CloseRequested { .. } => {
+            set_carousel_keep_awake_active(&keep_awake_state, false);
+        }
+        _ => {}
+    });
 }
 
 fn bring_window_to_front(window: &WebviewWindow) -> Result<(), String> {
@@ -2110,6 +2234,7 @@ fn set_current_window_fullscreen(
     window: WebviewWindow,
     fullscreen: bool,
     fullscreen_restore_state: State<'_, WindowsFullscreenRestoreState>,
+    keep_awake_state: State<'_, KeepAwakeState>,
 ) -> Result<(), String> {
     let label = window.label().to_string();
     if !fullscreen {
@@ -2120,6 +2245,10 @@ fn set_current_window_fullscreen(
     window
         .set_fullscreen(fullscreen)
         .map_err(|err| format!("Failed to set fullscreen: {err}"))?;
+    set_carousel_keep_awake_active(
+        keep_awake_state.inner(),
+        label == CAROUSEL_LABEL && fullscreen,
+    );
     if !fullscreen {
         std::thread::sleep(Duration::from_millis(120));
         let _ = window.set_decorations(true);
@@ -2840,6 +2969,7 @@ pub fn run() {
     tauri::Builder::default()
         .manage(Arc::new(Mutex::new(initial_thumbnail_progress())) as ThumbnailProgressState)
         .manage(Arc::new(Mutex::new(HashSet::<String>::new())) as WindowsFullscreenRestoreState)
+        .manage(Arc::new(Mutex::new(KeepAwake::default())) as KeepAwakeState)
         .plugin(tauri_plugin_dialog::init())
         .setup(|app| {
             if let Err(err) = refresh_asset_scope(&app.handle().clone()) {
