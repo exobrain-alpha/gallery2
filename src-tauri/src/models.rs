@@ -29,6 +29,7 @@ pub(crate) struct ImagePage {
 #[derive(Debug, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub(crate) struct SettingsState {
+    pub(crate) platform: String,
     pub(crate) paths: Vec<String>,
     pub(crate) image_count: i64,
     pub(crate) db_path: String,
@@ -40,6 +41,7 @@ pub(crate) struct SettingsState {
     pub(crate) gallery_has_gap: bool,
     pub(crate) gallery_theme: String,
     pub(crate) min_column_width: u32,
+    pub(crate) windows_close_behavior: String,
 }
 
 #[derive(Debug, Deserialize, Serialize, Clone)]

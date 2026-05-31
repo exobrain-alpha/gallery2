@@ -40,6 +40,10 @@ const QUIT_MENU_ID: &str = "quit";
 pub(crate) const DEDUPE_MAX_FILE_SIZE: u64 = 100 * 1024 * 1024;
 const EDITOR_SESSION_SEGMENT_TURNS: usize = 100;
 const ENCRYPTED_XAI_KEY_PREFIX: &str = "enc:v1:";
+const WINDOWS_CLOSE_BEHAVIOR_CONFIG_KEY: &str = "windows_close_behavior";
+const WINDOWS_CLOSE_BEHAVIOR_ASK: &str = "ask";
+const WINDOWS_CLOSE_BEHAVIOR_EXIT: &str = "exit";
+const WINDOWS_CLOSE_BEHAVIOR_TRAY: &str = "tray";
 #[allow(dead_code)]
 pub(crate) const THUMBNAIL_MAX_EDGE: u32 = 768;
 #[allow(dead_code)]
@@ -268,6 +272,23 @@ pub(crate) fn configured_thumbnail_dir(
 
 pub(crate) fn thumbnail_enabled(conn: &Connection) -> Result<bool, String> {
     Ok(read_config(conn, "thumbnail_enabled", "false")? == "true")
+}
+
+fn normalize_windows_close_behavior(value: String) -> String {
+    match value.as_str() {
+        WINDOWS_CLOSE_BEHAVIOR_EXIT | WINDOWS_CLOSE_BEHAVIOR_TRAY | WINDOWS_CLOSE_BEHAVIOR_ASK => {
+            value
+        }
+        _ => WINDOWS_CLOSE_BEHAVIOR_ASK.to_string(),
+    }
+}
+
+fn windows_close_behavior(conn: &Connection) -> Result<String, String> {
+    Ok(normalize_windows_close_behavior(read_config(
+        conn,
+        WINDOWS_CLOSE_BEHAVIOR_CONFIG_KEY,
+        WINDOWS_CLOSE_BEHAVIOR_ASK,
+    )?))
 }
 
 fn source_roots_from_conn(conn: &Connection) -> Result<Vec<PathBuf>, String> {
@@ -612,6 +633,25 @@ fn normalize_gallery_mode(mode: String, preferences: &GalleryPreferences) -> Str
                 "white".to_string()
             }
         }
+    }
+}
+
+fn current_platform() -> String {
+    #[cfg(target_os = "windows")]
+    {
+        "windows".to_string()
+    }
+    #[cfg(target_os = "macos")]
+    {
+        "macos".to_string()
+    }
+    #[cfg(target_os = "linux")]
+    {
+        "linux".to_string()
+    }
+    #[cfg(not(any(target_os = "windows", target_os = "macos", target_os = "linux")))]
+    {
+        "unknown".to_string()
     }
 }
 
@@ -1828,6 +1868,19 @@ fn attach_close_handler(window: &WebviewWindow) {
         window.on_window_event(move |event| {
             if let WindowEvent::CloseRequested { api, .. } = event {
                 api.prevent_close();
+                let app = window_for_close.app_handle().clone();
+                let behavior = open_db(&app)
+                    .and_then(|conn| windows_close_behavior(&conn))
+                    .unwrap_or_else(|_| WINDOWS_CLOSE_BEHAVIOR_ASK.to_string());
+                if behavior == WINDOWS_CLOSE_BEHAVIOR_EXIT {
+                    app.exit(0);
+                    return;
+                }
+                if behavior == WINDOWS_CLOSE_BEHAVIOR_TRAY {
+                    let _ = window_for_close.hide();
+                    return;
+                }
+
                 let Ok(mut is_prompt_open) = prompt_open.lock() else {
                     return;
                 };
@@ -1837,13 +1890,14 @@ fn attach_close_handler(window: &WebviewWindow) {
                 *is_prompt_open = true;
                 drop(is_prompt_open);
 
-                let app = window_for_close.app_handle().clone();
                 let window_for_dialog = window_for_close.clone();
                 let window_for_action = window_for_close.clone();
                 let prompt_open_after_close = Arc::clone(&prompt_open);
                 window_for_dialog
                     .dialog()
-                    .message("是否退出 Gallery？选择“保留在托盘”会关闭当前窗口，应用继续在托盘栏运行。")
+                    .message(
+                        "是否退出 Gallery？选择“保留在托盘”会关闭当前窗口，应用继续在托盘栏运行。",
+                    )
                     .title("关闭窗口")
                     .kind(MessageDialogKind::Info)
                     .buttons(MessageDialogButtons::OkCancelCustom(
@@ -1938,6 +1992,7 @@ fn get_settings(app: tauri::AppHandle) -> Result<SettingsState, String> {
     let preferences = get_gallery_preferences_from_conn(&conn)?;
 
     Ok(SettingsState {
+        platform: current_platform(),
         paths,
         image_count,
         db_path: user_path_string(&db_path(&app)?),
@@ -1949,6 +2004,7 @@ fn get_settings(app: tauri::AppHandle) -> Result<SettingsState, String> {
         gallery_has_gap: preferences.has_gap,
         gallery_theme: preferences.theme,
         min_column_width: preferences.min_column_width,
+        windows_close_behavior: windows_close_behavior(&conn)?,
     })
 }
 
@@ -2009,6 +2065,17 @@ fn save_source_paths(app: tauri::AppHandle, paths: Vec<String>) -> Result<Vec<St
     refresh_asset_scope_with_conn(&app, &conn)?;
     start_resource_cleanup(app);
     Ok(stored_paths)
+}
+
+#[tauri::command]
+fn save_windows_close_behavior(
+    app: tauri::AppHandle,
+    close_behavior: String,
+) -> Result<String, String> {
+    let conn = open_db(&app)?;
+    let close_behavior = normalize_windows_close_behavior(close_behavior);
+    write_config(&conn, WINDOWS_CLOSE_BEHAVIOR_CONFIG_KEY, &close_behavior)?;
+    Ok(close_behavior)
 }
 
 #[tauri::command]
@@ -2585,6 +2652,7 @@ pub fn run() {
             get_gallery_preferences,
             save_gallery_preferences,
             save_source_paths,
+            save_windows_close_behavior,
             save_xai_settings,
             get_xai_key_status,
             save_thumbnail_settings,

@@ -6,6 +6,7 @@ import type {
   ExtensionRepairSummary,
   ScanSummary,
   SettingsState,
+  WindowsCloseBehavior,
 } from '../../types';
 import {
   formatCount,
@@ -26,7 +27,13 @@ interface StatusState {
   tone: StatusTone;
 }
 
+function normalizeWindowsCloseBehavior(value: string): WindowsCloseBehavior {
+  if (value === 'exit' || value === 'tray' || value === 'ask') return value;
+  return 'ask';
+}
+
 export function SettingsView() {
+  const [platform, setPlatform] = useState('');
   const [paths, setPaths] = useState<string[]>([]);
   const [savedPaths, setSavedPaths] = useState<string[]>([]);
   const [imageCount, setImageCount] = useState(0);
@@ -41,10 +48,15 @@ export function SettingsView() {
   const [savedTheme, setSavedTheme] = useState<'black' | 'white'>('white');
   const [minColumnWidth, setMinColumnWidth] = useState(280);
   const [savedMinColumnWidth, setSavedMinColumnWidth] = useState(280);
+  const [windowsCloseBehavior, setWindowsCloseBehavior] =
+    useState<WindowsCloseBehavior>('ask');
+  const [savedWindowsCloseBehavior, setSavedWindowsCloseBehavior] =
+    useState<WindowsCloseBehavior>('ask');
   const [status, setStatus] = useState<StatusState>({ message: '', tone: '' });
   const [runningTask, setRunningTask] = useState<TaskName | null>(null);
   const [pickingGeneratedDir, setPickingGeneratedDir] = useState(false);
   const [addingPaths, setAddingPaths] = useState(false);
+  const isWindows = platform === 'windows';
 
   useEffect(() => {
     setPageBackground('#f7f7f7');
@@ -60,7 +72,8 @@ export function SettingsView() {
       theme !== savedTheme ||
       minColumnWidth !== savedMinColumnWidth ||
       xaiKey !== savedXaiKey ||
-      generatedDir !== savedGeneratedDir
+      generatedDir !== savedGeneratedDir ||
+      (isWindows && windowsCloseBehavior !== savedWindowsCloseBehavior)
     );
   }, [
     paths,
@@ -75,6 +88,9 @@ export function SettingsView() {
     savedXaiKey,
     generatedDir,
     savedGeneratedDir,
+    isWindows,
+    windowsCloseBehavior,
+    savedWindowsCloseBehavior,
   ]);
 
   const taskDisabled = dirty || runningTask !== null;
@@ -82,6 +98,8 @@ export function SettingsView() {
   async function loadSettings() {
     const settings = await invoke<SettingsState>('get_settings');
     const loadedPaths = uniquePaths(settings.paths);
+    const closeBehavior = normalizeWindowsCloseBehavior(settings.windowsCloseBehavior);
+    setPlatform(settings.platform || '');
     setPaths(loadedPaths);
     setSavedPaths(loadedPaths);
     setImageCount(settings.imageCount);
@@ -96,6 +114,8 @@ export function SettingsView() {
     setSavedTheme(settings.galleryTheme === 'black' ? 'black' : 'white');
     setMinColumnWidth(settings.minColumnWidth || 280);
     setSavedMinColumnWidth(settings.minColumnWidth || 280);
+    setWindowsCloseBehavior(closeBehavior);
+    setSavedWindowsCloseBehavior(closeBehavior);
     setStatus({ message: '', tone: '' });
   }
 
@@ -115,6 +135,11 @@ export function SettingsView() {
       thumbnailEnabled: false,
       thumbnailDir: '',
     });
+    const storedWindowsCloseBehavior = isWindows
+      ? await invoke<WindowsCloseBehavior>('save_windows_close_behavior', {
+          closeBehavior: windowsCloseBehavior,
+        })
+      : windowsCloseBehavior;
     const storedPaths = await invoke<string[]>('save_source_paths', { paths });
     const normalizedPaths = uniquePaths(storedPaths);
     setPaths(normalizedPaths);
@@ -124,6 +149,8 @@ export function SettingsView() {
     setSavedMinColumnWidth(minColumnWidth);
     setSavedXaiKey(xaiKey);
     setSavedGeneratedDir(generatedDir);
+    setWindowsCloseBehavior(storedWindowsCloseBehavior);
+    setSavedWindowsCloseBehavior(storedWindowsCloseBehavior);
     setStatus({ message: '扫描中...', tone: '' });
     const scanSummary = await invoke<ScanSummary>('scan_library', { paths: normalizedPaths });
     setImageCount(scanSummary.total);
@@ -454,6 +481,46 @@ export function SettingsView() {
               onChange={(event) => setMinColumnWidth(Number(event.currentTarget.value) || 280)}
             />
           </div>
+
+          {isWindows && (
+            <div className="field">
+              <span className="field-head">
+                <span className="field-label">关闭窗口</span>
+              </span>
+              <div className="choice-group" role="radiogroup" aria-label="关闭窗口">
+                <label className="choice-pill">
+                  <input
+                    type="radio"
+                    name="windows-close-behavior"
+                    value="ask"
+                    checked={windowsCloseBehavior === 'ask'}
+                    onChange={() => setWindowsCloseBehavior('ask')}
+                  />
+                  <span>每次询问</span>
+                </label>
+                <label className="choice-pill">
+                  <input
+                    type="radio"
+                    name="windows-close-behavior"
+                    value="exit"
+                    checked={windowsCloseBehavior === 'exit'}
+                    onChange={() => setWindowsCloseBehavior('exit')}
+                  />
+                  <span>退出应用</span>
+                </label>
+                <label className="choice-pill">
+                  <input
+                    type="radio"
+                    name="windows-close-behavior"
+                    value="tray"
+                    checked={windowsCloseBehavior === 'tray'}
+                    onChange={() => setWindowsCloseBehavior('tray')}
+                  />
+                  <span>保留托盘</span>
+                </label>
+              </div>
+            </div>
+          )}
         </div>
 
         <div className="settings-actions">

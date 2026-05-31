@@ -20,7 +20,10 @@ export interface ImagePage {
   nextCursor: ImageCursor | null;
 }
 
+export type WindowsCloseBehavior = "ask" | "exit" | "tray";
+
 export interface SettingsState {
+  platform: string;
   paths: string[];
   imageCount: number;
   dbPath: string;
@@ -32,6 +35,7 @@ export interface SettingsState {
   galleryHasGap: boolean;
   galleryTheme: "black" | "white";
   minColumnWidth: number;
+  windowsCloseBehavior: WindowsCloseBehavior;
 }
 
 export interface GalleryPreferences {
