@@ -69,6 +69,7 @@ Var UpdateMode
 Var NoShortcutMode
 Var WixMode
 Var OldMainBinaryName
+Var RunMainBinaryAfterFinish
 
 Name "${PRODUCTNAME}"
 BrandingText "${COPYRIGHT}"
@@ -433,7 +434,13 @@ Var AppStartMenuFolder
 !insertmacro MUI_PAGE_FINISH
 
 Function RunMainBinary
-  nsis_tauri_utils::RunAsUser "$INSTDIR\${MAINBINARYNAME}.exe" ""
+  StrCpy $RunMainBinaryAfterFinish 1
+FunctionEnd
+
+Function .onGUIEnd
+  ${If} $RunMainBinaryAfterFinish = 1
+    nsis_tauri_utils::RunAsUser "$INSTDIR\${MAINBINARYNAME}.exe" ""
+  ${EndIf}
 FunctionEnd
 
 ; Uninstaller Pages
