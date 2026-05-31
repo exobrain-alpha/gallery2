@@ -42,6 +42,15 @@ pub(crate) struct SettingsState {
     pub(crate) gallery_theme: String,
     pub(crate) min_column_width: u32,
     pub(crate) windows_close_behavior: String,
+    pub(crate) windows_startup_enabled: bool,
+    pub(crate) windows_startup_desktop_background: bool,
+}
+
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct WindowsStartupSettings {
+    pub(crate) startup_enabled: bool,
+    pub(crate) startup_desktop_background: bool,
 }
 
 #[derive(Debug, Deserialize, Serialize, Clone)]

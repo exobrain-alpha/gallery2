@@ -8,6 +8,7 @@ import type {
   SettingsState,
   SourcePathsUpdate,
   WindowsCloseBehavior,
+  WindowsStartupSettings,
 } from '../../types';
 import {
   formatCount,
@@ -54,6 +55,10 @@ export function SettingsView() {
     useState<WindowsCloseBehavior>('ask');
   const [savedWindowsCloseBehavior, setSavedWindowsCloseBehavior] =
     useState<WindowsCloseBehavior>('ask');
+  const [windowsStartupEnabled, setWindowsStartupEnabled] = useState(false);
+  const [savedWindowsStartupEnabled, setSavedWindowsStartupEnabled] = useState(false);
+  const [windowsStartupDesktopBackground, setWindowsStartupDesktopBackground] = useState(false);
+  const [savedWindowsStartupDesktopBackground, setSavedWindowsStartupDesktopBackground] = useState(false);
   const [status, setStatus] = useState<StatusState>({ message: '', tone: '' });
   const [runningTask, setRunningTask] = useState<TaskName | null>(null);
   const [openingWindow, setOpeningWindow] = useState<OpenTarget | null>(null);
@@ -76,7 +81,9 @@ export function SettingsView() {
       minColumnWidth !== savedMinColumnWidth ||
       xaiKey !== savedXaiKey ||
       generatedDir !== savedGeneratedDir ||
-      (isWindows && windowsCloseBehavior !== savedWindowsCloseBehavior)
+      (isWindows && windowsCloseBehavior !== savedWindowsCloseBehavior) ||
+      (isWindows && windowsStartupEnabled !== savedWindowsStartupEnabled) ||
+      (isWindows && windowsStartupDesktopBackground !== savedWindowsStartupDesktopBackground)
     );
   }, [
     paths,
@@ -94,6 +101,10 @@ export function SettingsView() {
     isWindows,
     windowsCloseBehavior,
     savedWindowsCloseBehavior,
+    windowsStartupEnabled,
+    savedWindowsStartupEnabled,
+    windowsStartupDesktopBackground,
+    savedWindowsStartupDesktopBackground,
   ]);
 
   const taskDisabled = dirty || runningTask !== null;
@@ -119,6 +130,10 @@ export function SettingsView() {
     setSavedMinColumnWidth(settings.minColumnWidth || 280);
     setWindowsCloseBehavior(closeBehavior);
     setSavedWindowsCloseBehavior(closeBehavior);
+    setWindowsStartupEnabled(Boolean(settings.windowsStartupEnabled));
+    setSavedWindowsStartupEnabled(Boolean(settings.windowsStartupEnabled));
+    setWindowsStartupDesktopBackground(Boolean(settings.windowsStartupDesktopBackground));
+    setSavedWindowsStartupDesktopBackground(Boolean(settings.windowsStartupDesktopBackground));
     setStatus({ message: '', tone: '' });
   }
 
@@ -128,6 +143,10 @@ export function SettingsView() {
     const xaiChanged = xaiKey !== savedXaiKey || generatedDir !== savedGeneratedDir;
     const closeBehaviorChanged =
       isWindows && windowsCloseBehavior !== savedWindowsCloseBehavior;
+    const startupChanged =
+      isWindows &&
+      (windowsStartupEnabled !== savedWindowsStartupEnabled ||
+        windowsStartupDesktopBackground !== savedWindowsStartupDesktopBackground);
     const sourcePathsChanged = !pathsEqual(paths, savedPaths);
     let normalizedPaths = paths;
     let shouldScan = false;
@@ -152,6 +171,15 @@ export function SettingsView() {
           closeBehavior: windowsCloseBehavior,
         })
       : windowsCloseBehavior;
+    const storedWindowsStartup = startupChanged
+      ? await invoke<WindowsStartupSettings>('save_windows_startup_settings', {
+          startupEnabled: windowsStartupEnabled,
+          startupDesktopBackground: windowsStartupDesktopBackground,
+        })
+      : {
+          startupEnabled: windowsStartupEnabled,
+          startupDesktopBackground: windowsStartupDesktopBackground,
+        };
     if (sourcePathsChanged) {
       const sourcePathsUpdate = await invoke<SourcePathsUpdate>('save_source_paths', { paths });
       normalizedPaths = uniquePaths(sourcePathsUpdate.paths);
@@ -167,6 +195,10 @@ export function SettingsView() {
     setSavedGeneratedDir(generatedDir);
     setWindowsCloseBehavior(storedWindowsCloseBehavior);
     setSavedWindowsCloseBehavior(storedWindowsCloseBehavior);
+    setWindowsStartupEnabled(storedWindowsStartup.startupEnabled);
+    setSavedWindowsStartupEnabled(storedWindowsStartup.startupEnabled);
+    setWindowsStartupDesktopBackground(storedWindowsStartup.startupDesktopBackground);
+    setSavedWindowsStartupDesktopBackground(storedWindowsStartup.startupDesktopBackground);
     if (shouldScan) {
       setStatus({ message: '扫描中...', tone: '' });
       const scanSummary = await invoke<ScanSummary>('scan_library', { paths: normalizedPaths });
@@ -208,6 +240,11 @@ export function SettingsView() {
     } finally {
       setPickingGeneratedDir(false);
     }
+  }
+
+  function handleWindowsStartupEnabledChange(enabled: boolean) {
+    setWindowsStartupEnabled(enabled);
+    if (!enabled) setWindowsStartupDesktopBackground(false);
   }
 
   async function runTask<T>(
@@ -513,43 +550,72 @@ export function SettingsView() {
           </div>
 
           {isWindows && (
-            <div className="field">
-              <span className="field-head">
-                <span className="field-label">关闭窗口</span>
-              </span>
-              <div className="choice-group" role="radiogroup" aria-label="关闭窗口">
-                <label className="choice-pill">
-                  <input
-                    type="radio"
-                    name="windows-close-behavior"
-                    value="ask"
-                    checked={windowsCloseBehavior === 'ask'}
-                    onChange={() => setWindowsCloseBehavior('ask')}
-                  />
-                  <span>每次询问</span>
-                </label>
-                <label className="choice-pill">
-                  <input
-                    type="radio"
-                    name="windows-close-behavior"
-                    value="exit"
-                    checked={windowsCloseBehavior === 'exit'}
-                    onChange={() => setWindowsCloseBehavior('exit')}
-                  />
-                  <span>退出应用</span>
-                </label>
-                <label className="choice-pill">
-                  <input
-                    type="radio"
-                    name="windows-close-behavior"
-                    value="tray"
-                    checked={windowsCloseBehavior === 'tray'}
-                    onChange={() => setWindowsCloseBehavior('tray')}
-                  />
-                  <span>保留托盘</span>
-                </label>
+            <>
+              <div className="field">
+                <span className="field-head">
+                  <span className="field-label">开机启动</span>
+                </span>
+                <div className="toggle-list">
+                  <label className="toggle-row">
+                    <span>启动应用</span>
+                    <input
+                      type="checkbox"
+                      checked={windowsStartupEnabled}
+                      onChange={(event) => handleWindowsStartupEnabledChange(event.currentTarget.checked)}
+                    />
+                    <span className="toggle-switch" aria-hidden="true" />
+                  </label>
+                  <label className="toggle-row" data-disabled={!windowsStartupEnabled}>
+                    <span>打开桌面背景</span>
+                    <input
+                      type="checkbox"
+                      checked={windowsStartupDesktopBackground}
+                      disabled={!windowsStartupEnabled}
+                      onChange={(event) => setWindowsStartupDesktopBackground(event.currentTarget.checked)}
+                    />
+                    <span className="toggle-switch" aria-hidden="true" />
+                  </label>
+                </div>
               </div>
-            </div>
+
+              <div className="field">
+                <span className="field-head">
+                  <span className="field-label">关闭窗口</span>
+                </span>
+                <div className="choice-group" role="radiogroup" aria-label="关闭窗口">
+                  <label className="choice-pill">
+                    <input
+                      type="radio"
+                      name="windows-close-behavior"
+                      value="ask"
+                      checked={windowsCloseBehavior === 'ask'}
+                      onChange={() => setWindowsCloseBehavior('ask')}
+                    />
+                    <span>每次询问</span>
+                  </label>
+                  <label className="choice-pill">
+                    <input
+                      type="radio"
+                      name="windows-close-behavior"
+                      value="exit"
+                      checked={windowsCloseBehavior === 'exit'}
+                      onChange={() => setWindowsCloseBehavior('exit')}
+                    />
+                    <span>退出应用</span>
+                  </label>
+                  <label className="choice-pill">
+                    <input
+                      type="radio"
+                      name="windows-close-behavior"
+                      value="tray"
+                      checked={windowsCloseBehavior === 'tray'}
+                      onChange={() => setWindowsCloseBehavior('tray')}
+                    />
+                    <span>保留托盘</span>
+                  </label>
+                </div>
+              </div>
+            </>
           )}
         </div>
 

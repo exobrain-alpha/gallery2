@@ -36,6 +36,13 @@ export interface SettingsState {
   galleryTheme: "black" | "white";
   minColumnWidth: number;
   windowsCloseBehavior: WindowsCloseBehavior;
+  windowsStartupEnabled: boolean;
+  windowsStartupDesktopBackground: boolean;
+}
+
+export interface WindowsStartupSettings {
+  startupEnabled: boolean;
+  startupDesktopBackground: boolean;
 }
 
 export interface GalleryPreferences {
