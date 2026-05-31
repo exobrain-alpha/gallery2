@@ -1971,6 +1971,7 @@ fn apply_desktop_background_window_role(window: &WebviewWindow) -> Result<(), St
     #[cfg(not(any(target_os = "macos", target_os = "windows")))]
     let _ = window.set_always_on_bottom(true);
     let _ = window.set_visible_on_all_workspaces(true);
+    #[cfg(not(target_os = "windows"))]
     let _ = window.set_ignore_cursor_events(true);
 
     let (left, top, width, height) = desktop_bounds(window)?;
@@ -1981,31 +1982,34 @@ fn apply_desktop_background_window_role(window: &WebviewWindow) -> Result<(), St
         .set_size(Size::Physical(PhysicalSize::new(width, height)))
         .map_err(|err| format!("Failed to size desktop background: {err}"))?;
 
-    apply_desktop_background_platform_role(window);
-    Ok(())
+    apply_desktop_background_platform_role(window)
 }
 
 #[cfg(target_os = "windows")]
-fn apply_desktop_background_platform_role(window: &WebviewWindow) {
+fn apply_desktop_background_platform_role(window: &WebviewWindow) -> Result<(), String> {
     if let Ok(hwnd) = window.hwnd() {
         let (_, _, width, height) = desktop_bounds(window).unwrap_or((0, 0, 1, 1));
         unsafe {
-            attach_window_to_windows_desktop(hwnd.0 as isize, width, height);
+            attach_window_to_windows_desktop(hwnd.0 as isize, width, height)?;
         }
     }
+    Ok(())
 }
 
 #[cfg(target_os = "macos")]
-fn apply_desktop_background_platform_role(window: &WebviewWindow) {
+fn apply_desktop_background_platform_role(window: &WebviewWindow) -> Result<(), String> {
     if let Ok(ns_window) = window.ns_window() {
         unsafe {
             set_macos_desktop_backdrop_window_level(ns_window);
         }
     }
+    Ok(())
 }
 
 #[cfg(not(any(target_os = "windows", target_os = "macos")))]
-fn apply_desktop_background_platform_role(_window: &WebviewWindow) {}
+fn apply_desktop_background_platform_role(_window: &WebviewWindow) -> Result<(), String> {
+    Ok(())
+}
 
 #[cfg(target_os = "macos")]
 unsafe fn set_macos_desktop_backdrop_window_level(ns_window: *mut std::ffi::c_void) {
@@ -2048,7 +2052,11 @@ unsafe fn set_macos_desktop_backdrop_window_level(ns_window: *mut std::ffi::c_vo
 }
 
 #[cfg(target_os = "windows")]
-unsafe fn attach_window_to_windows_desktop(hwnd: isize, width: u32, height: u32) {
+unsafe fn attach_window_to_windows_desktop(
+    hwnd: isize,
+    width: u32,
+    height: u32,
+) -> Result<(), String> {
     type EnumWindowsProc = unsafe extern "system" fn(isize, isize) -> i32;
 
     #[link(name = "user32")]
@@ -2073,6 +2081,7 @@ unsafe fn attach_window_to_windows_desktop(hwnd: isize, width: u32, height: u32)
         fn SetParent(child: isize, parent: isize) -> isize;
         fn GetWindowLongPtrW(hwnd: isize, index: i32) -> isize;
         fn SetWindowLongPtrW(hwnd: isize, index: i32, new_long: isize) -> isize;
+        fn ShowWindow(hwnd: isize, cmd_show: i32) -> i32;
         fn SetWindowPos(
             hwnd: isize,
             insert_after: isize,
@@ -2082,6 +2091,11 @@ unsafe fn attach_window_to_windows_desktop(hwnd: isize, width: u32, height: u32)
             cy: i32,
             flags: u32,
         ) -> i32;
+    }
+
+    #[derive(Default)]
+    struct DesktopHostSearch {
+        workerw: isize,
     }
 
     unsafe extern "system" fn find_workerw(hwnd: isize, lparam: isize) -> i32 {
@@ -2098,7 +2112,7 @@ unsafe fn attach_window_to_windows_desktop(hwnd: isize, width: u32, height: u32)
                 unsafe { FindWindowExW(0, hwnd, wide_null("WorkerW").as_ptr(), std::ptr::null()) };
             if workerw != 0 {
                 unsafe {
-                    *(lparam as *mut isize) = workerw;
+                    (*(lparam as *mut DesktopHostSearch)).workerw = workerw;
                 }
                 return 0;
             }
@@ -2111,52 +2125,100 @@ unsafe fn attach_window_to_windows_desktop(hwnd: isize, width: u32, height: u32)
     const SWP_NOACTIVATE: u32 = 0x0010;
     const SWP_FRAMECHANGED: u32 = 0x0020;
     const SWP_SHOWWINDOW: u32 = 0x0040;
+    const SW_SHOWNA: i32 = 8;
     const GWL_STYLE: i32 = -16;
+    const GWL_EXSTYLE: i32 = -20;
     const WS_POPUP: isize = 0x80000000u32 as isize;
     const WS_CHILD: isize = 0x40000000;
+    const WS_CAPTION: isize = 0x00c00000;
+    const WS_THICKFRAME: isize = 0x00040000;
+    const WS_SYSMENU: isize = 0x00080000;
+    const WS_MAXIMIZEBOX: isize = 0x00010000;
+    const WS_MINIMIZEBOX: isize = 0x00020000;
+    const WS_CLIPSIBLINGS: isize = 0x04000000;
     const WS_VISIBLE: isize = 0x10000000;
+    const WS_EX_DLGMODALFRAME: isize = 0x00000001;
+    const WS_EX_TRANSPARENT: isize = 0x00000020;
+    const WS_EX_TOOLWINDOW: isize = 0x00000080;
+    const WS_EX_WINDOWEDGE: isize = 0x00000100;
+    const WS_EX_CLIENTEDGE: isize = 0x00000200;
+    const WS_EX_STATICEDGE: isize = 0x00020000;
+    const WS_EX_APPWINDOW: isize = 0x00040000;
+    const WS_EX_LAYERED: isize = 0x00080000;
+    const WS_EX_COMPOSITED: isize = 0x02000000;
+    const WS_EX_NOACTIVATE: isize = 0x08000000;
     const HWND_TOP: isize = 0;
-    const HWND_BOTTOM: isize = 1;
 
     let progman = unsafe { FindWindowW(wide_null("Progman").as_ptr(), std::ptr::null()) };
     if progman == 0 {
-        return;
+        return Err("Failed to find Windows Progman desktop host".to_string());
     }
 
-    let mut message_result = 0usize;
+    for (wparam, lparam) in [(0, 0), (0x0d, 0), (0x0d, 1)] {
+        let mut message_result = 0usize;
+        let _ = unsafe {
+            SendMessageTimeoutW(
+                progman,
+                WM_SPAWN_WORKERW,
+                wparam,
+                lparam,
+                SMTO_NORMAL,
+                1000,
+                &mut message_result,
+            )
+        };
+    }
+
+    let mut search = DesktopHostSearch::default();
     let _ = unsafe {
-        SendMessageTimeoutW(
-            progman,
-            WM_SPAWN_WORKERW,
-            0,
-            0,
-            SMTO_NORMAL,
-            1000,
-            &mut message_result,
+        EnumWindows(
+            Some(find_workerw),
+            &mut search as *mut DesktopHostSearch as isize,
         )
     };
-
-    let mut workerw = 0isize;
-    let _ = unsafe { EnumWindows(Some(find_workerw), &mut workerw as *mut isize as isize) };
-    let parent = if workerw != 0 { workerw } else { progman };
+    if search.workerw == 0 {
+        return Err("Failed to find Windows WorkerW wallpaper host".to_string());
+    }
 
     let style = unsafe { GetWindowLongPtrW(hwnd, GWL_STYLE) };
-    let _ =
-        unsafe { SetWindowLongPtrW(hwnd, GWL_STYLE, (style & !WS_POPUP) | WS_CHILD | WS_VISIBLE) };
-    let _ = unsafe { SetParent(hwnd, parent) };
+    let child_style = (style
+        & !(WS_POPUP | WS_CAPTION | WS_THICKFRAME | WS_SYSMENU | WS_MAXIMIZEBOX | WS_MINIMIZEBOX))
+        | WS_CHILD
+        | WS_VISIBLE
+        | WS_CLIPSIBLINGS;
+    let _ = unsafe { SetWindowLongPtrW(hwnd, GWL_STYLE, child_style) };
 
-    let insert_after = if workerw != 0 { HWND_TOP } else { HWND_BOTTOM };
+    let ex_style = unsafe { GetWindowLongPtrW(hwnd, GWL_EXSTYLE) };
+    let child_ex_style = (ex_style
+        & !(WS_EX_APPWINDOW
+            | WS_EX_TOOLWINDOW
+            | WS_EX_WINDOWEDGE
+            | WS_EX_CLIENTEDGE
+            | WS_EX_DLGMODALFRAME
+            | WS_EX_STATICEDGE
+            | WS_EX_LAYERED
+            | WS_EX_TRANSPARENT
+            | WS_EX_COMPOSITED))
+        | WS_EX_NOACTIVATE;
+    let _ = unsafe { SetWindowLongPtrW(hwnd, GWL_EXSTYLE, child_ex_style) };
+
+    let _ = unsafe { SetParent(hwnd, search.workerw) };
+
+    let width = i32::try_from(width).unwrap_or(i32::MAX);
+    let height = i32::try_from(height).unwrap_or(i32::MAX);
     let _ = unsafe {
         SetWindowPos(
             hwnd,
-            insert_after,
+            HWND_TOP,
             0,
             0,
-            i32::try_from(width).unwrap_or(i32::MAX),
-            i32::try_from(height).unwrap_or(i32::MAX),
+            width,
+            height,
             SWP_NOACTIVATE | SWP_FRAMECHANGED | SWP_SHOWWINDOW,
         )
     };
+    let _ = unsafe { ShowWindow(hwnd, SW_SHOWNA) };
+    Ok(())
 }
 
 #[cfg(target_os = "windows")]
@@ -2173,7 +2235,7 @@ fn show_desktop_background_window(app: &tauri::AppHandle) -> Result<(), String> 
         window
             .show()
             .map_err(|err| format!("Failed to show desktop background: {err}"))?;
-        apply_desktop_background_platform_role(&window);
+        apply_desktop_background_platform_role(&window)?;
         return Ok(());
     }
 
@@ -2211,7 +2273,7 @@ fn show_desktop_background_window(app: &tauri::AppHandle) -> Result<(), String> 
     window
         .show()
         .map_err(|err| format!("Failed to show desktop background: {err}"))?;
-    apply_desktop_background_platform_role(&window);
+    apply_desktop_background_platform_role(&window)?;
     Ok(())
 }
 
