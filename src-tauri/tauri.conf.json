@@ -38,9 +38,14 @@
     "targets": "all",
     "windows": {
       "nsis": {
+        "template": "nsis/installer.nsi",
+        "installerIcon": "icons/icon.ico",
         "languages": [
           "SimpChinese"
         ],
+        "customLanguageFiles": {
+          "SimpChinese": "nsis/SimpChinese.nsh"
+        },
         "displayLanguageSelector": false
       },
       "wix": {

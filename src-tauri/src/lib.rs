@@ -292,6 +292,16 @@ fn windows_close_behavior(conn: &Connection) -> Result<String, String> {
     )?))
 }
 
+fn persist_windows_close_behavior(
+    app: &tauri::AppHandle,
+    close_behavior: String,
+) -> Result<String, String> {
+    let conn = open_db(app)?;
+    let close_behavior = normalize_windows_close_behavior(close_behavior);
+    write_config(&conn, WINDOWS_CLOSE_BEHAVIOR_CONFIG_KEY, &close_behavior)?;
+    Ok(close_behavior)
+}
+
 fn source_roots_from_conn(conn: &Connection) -> Result<Vec<PathBuf>, String> {
     let mut stmt = conn
         .prepare("SELECT path FROM source_paths ORDER BY path COLLATE NOCASE")
@@ -1989,19 +1999,27 @@ fn attach_close_handler(window: &WebviewWindow) {
                 let prompt_open_after_close = Arc::clone(&prompt_open);
                 window_for_dialog
                     .dialog()
-                    .message(
-                        "是否退出 Gallery？选择“保留在托盘”会关闭当前窗口，应用继续在托盘栏运行。",
-                    )
+                    .message("本次关闭方式将作为默认选择保存，之后可在设置中调整。")
                     .parent(&window_for_dialog)
-                    .title("关闭窗口")
+                    .title("关闭 Gallery")
                     .kind(MessageDialogKind::Info)
                     .buttons(MessageDialogButtons::OkCancelCustom(
                         "退出应用".to_string(),
-                        "保留在托盘".to_string(),
+                        "保留托盘".to_string(),
                     ))
                     .show(move |should_exit| {
                         if let Ok(mut is_prompt_open) = prompt_open_after_close.lock() {
                             *is_prompt_open = false;
+                        }
+                        let close_behavior = if should_exit {
+                            WINDOWS_CLOSE_BEHAVIOR_EXIT
+                        } else {
+                            WINDOWS_CLOSE_BEHAVIOR_TRAY
+                        };
+                        if let Err(err) =
+                            persist_windows_close_behavior(&app, close_behavior.to_string())
+                        {
+                            eprintln!("Failed to persist Windows close behavior: {err}");
                         }
                         if should_exit {
                             app.exit(0);
@@ -2175,10 +2193,7 @@ fn save_windows_close_behavior(
     app: tauri::AppHandle,
     close_behavior: String,
 ) -> Result<String, String> {
-    let conn = open_db(&app)?;
-    let close_behavior = normalize_windows_close_behavior(close_behavior);
-    write_config(&conn, WINDOWS_CLOSE_BEHAVIOR_CONFIG_KEY, &close_behavior)?;
-    Ok(close_behavior)
+    persist_windows_close_behavior(&app, close_behavior)
 }
 
 #[tauri::command]
