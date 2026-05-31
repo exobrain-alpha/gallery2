@@ -10,8 +10,9 @@ import type {
   PickedImage,
   XaiEditResult,
 } from "../../types";
-import { classNames, logError, mediaName, setPageBackground, storeGalleryTheme, storedGalleryTheme } from "../../utils";
+import { classNames, logError, setPageBackground, storeGalleryTheme, storedGalleryTheme } from "../../utils";
 import { buildLayout } from "./layout";
+import { MediaPlaceholder, PreviewImage, TileImage } from "./MediaTile";
 
 const PAGE_SIZE = 50;
 const OVERSCAN = 1200;
@@ -26,7 +27,7 @@ interface ViewportState {
 }
 
 type PreviewState =
-  | { type: "image"; src: string }
+  | { type: "image"; src: string; path?: string }
   | { type: "video"; src: string; width: number; height: number }
   | null;
 
@@ -245,7 +246,7 @@ export function GalleryView() {
       });
       return;
     }
-    setPreview({ type: "image", src });
+    setPreview({ type: "image", src, path: record.path });
   }
 
   const playTileVideo = useCallback((path: string, video: HTMLVideoElement | null) => {
@@ -367,7 +368,7 @@ export function GalleryView() {
                   onRemove={pauseTileVideo}
                 />
               ) : (
-                <img loading="lazy" decoding="async" draggable={false} src={convertFileSrc(record.displayPath || record.path)} alt={mediaName(record.path)} />
+                <TileImage record={record} />
               )}
               {selected ? (
                 <span className="image-tile-badge image-tile-selection-mark">
@@ -413,7 +414,7 @@ export function GalleryView() {
         readImageDataUri={(path) => invoke("read_image_data_uri", { path })}
         pickReferenceImages={() => invoke<PickedImage[]>("pick_xai_reference_images")}
         editImage={(payload) => invoke<XaiEditResult>("edit_image_with_xai", payload)}
-        onPreviewAttachment={(attachment) => setPreview({ type: "image", src: attachment.dataUrl || convertFileSrc(attachment.path) })}
+        onPreviewAttachment={(attachment) => setPreview({ type: "image", src: attachment.dataUrl || convertFileSrc(attachment.path), path: attachment.path })}
         onToggle={(nextOpen) => {
           document.body.classList.toggle("editing", nextOpen);
           if (nextOpen) {
@@ -437,10 +438,15 @@ function VideoTile({
   onRemove: (path: string) => void;
 }) {
   const videoRef = useRef<HTMLVideoElement | null>(null);
+  const [failed, setFailed] = useState(false);
 
   useEffect(() => {
     return () => onRemove(record.path);
   }, [record.path, onRemove]);
+
+  useEffect(() => {
+    setFailed(false);
+  }, [record.path]);
 
   return (
     <>
@@ -453,8 +459,13 @@ function VideoTile({
         controls={false}
         preload="metadata"
         draggable={false}
+        className={classNames("tile-media", failed && "is-error")}
         onLoadedMetadata={(event) => primeTileVideoFrame(event.currentTarget)}
+        onLoadedData={() => setFailed(false)}
+        onSeeked={() => setFailed(false)}
+        onError={() => setFailed(true)}
       />
+      {failed ? <MediaPlaceholder path={record.path} /> : null}
       <span
         className="video-tile-hover-target"
         onMouseEnter={() => onPlay(record.path, videoRef.current)}
@@ -493,7 +504,7 @@ function PreviewOverlay({ preview, onClose }: { preview: PreviewState; onClose: 
   return (
     <div className="preview image-preview" onClick={onClose}>
       <figure>
-        <img id="preview-image" src={preview.src} alt="" draggable={false} />
+        <PreviewImage src={preview.src} path={preview.path} />
       </figure>
     </div>
   );

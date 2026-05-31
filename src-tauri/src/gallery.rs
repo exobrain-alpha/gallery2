@@ -1,5 +1,5 @@
 use crate::models::{ImageCursor, ImagePage, ImageRecord};
-use crate::{configured_thumbnail_dir, open_db};
+use crate::{configured_thumbnail_dir, open_db, refresh_asset_scope_with_conn};
 use rusqlite::{params, Connection, OptionalExtension};
 use std::{fs, path::Path};
 use tauri::Manager;
@@ -23,6 +23,7 @@ pub(crate) fn list_images(
     limit: i64,
 ) -> Result<ImagePage, String> {
     let conn = open_db(&app)?;
+    refresh_asset_scope_with_conn(&app, &conn)?;
     let thumbnail_dir = configured_thumbnail_dir(&app, &conn)?;
     fs::create_dir_all(&thumbnail_dir)
         .map_err(|err| format!("Failed to create thumbnail directory: {err}"))?;
@@ -99,6 +100,7 @@ pub(crate) fn list_random_images(
     limit: i64,
 ) -> Result<Vec<ImageRecord>, String> {
     let conn = open_db(&app)?;
+    refresh_asset_scope_with_conn(&app, &conn)?;
     let thumbnail_dir = configured_thumbnail_dir(&app, &conn)?;
     fs::create_dir_all(&thumbnail_dir)
         .map_err(|err| format!("Failed to create thumbnail directory: {err}"))?;

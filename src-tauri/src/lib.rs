@@ -56,6 +56,43 @@ fn tray_icon() -> Option<tauri::image::Image<'static>> {
     ))
 }
 
+#[cfg(target_os = "windows")]
+fn claim_single_instance() -> bool {
+    use std::{
+        ffi::{c_void, OsStr},
+        os::windows::ffi::OsStrExt,
+        ptr,
+    };
+
+    type Handle = *mut c_void;
+    const ERROR_ALREADY_EXISTS: u32 = 183;
+
+    #[link(name = "kernel32")]
+    extern "system" {
+        fn CreateMutexW(
+            lp_mutex_attributes: *mut c_void,
+            b_initial_owner: i32,
+            lp_name: *const u16,
+        ) -> Handle;
+        fn GetLastError() -> u32;
+    }
+
+    let name = OsStr::new("Local\\com.wang.gallery2.single-instance")
+        .encode_wide()
+        .chain(Some(0))
+        .collect::<Vec<_>>();
+
+    unsafe {
+        let handle = CreateMutexW(ptr::null_mut(), 1, name.as_ptr());
+        !handle.is_null() && GetLastError() != ERROR_ALREADY_EXISTS
+    }
+}
+
+#[cfg(not(target_os = "windows"))]
+fn claim_single_instance() -> bool {
+    true
+}
+
 fn initial_thumbnail_progress() -> ThumbnailProgress {
     ThumbnailProgress {
         running: false,
@@ -251,7 +288,10 @@ fn allow_asset_directory(scope: &tauri::scope::fs::Scope, directory: &Path) -> R
     })
 }
 
-fn refresh_asset_scope_with_conn(app: &tauri::AppHandle, conn: &Connection) -> Result<(), String> {
+pub(crate) fn refresh_asset_scope_with_conn(
+    app: &tauri::AppHandle,
+    conn: &Connection,
+) -> Result<(), String> {
     let mut roots = source_roots_from_conn(conn)?;
     roots.push(app_data_dir(app)?);
     roots.push(configured_generated_content_dir(app, conn)?);
@@ -2394,6 +2434,10 @@ fn list_random_images(app: tauri::AppHandle, limit: i64) -> Result<Vec<ImageReco
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
+    if !claim_single_instance() {
+        return;
+    }
+
     tauri::Builder::default()
         .manage(Arc::new(Mutex::new(initial_thumbnail_progress())) as ThumbnailProgressState)
         .plugin(tauri_plugin_dialog::init())

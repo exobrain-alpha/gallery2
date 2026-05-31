@@ -2,8 +2,9 @@ import { convertFileSrc, invoke } from "@tauri-apps/api/core";
 import { useEffect, useMemo, useRef, useState } from "react";
 import type { CSSProperties, WheelEvent } from "react";
 import type { GalleryPreferences, ImageRecord } from "../../types";
-import { classNames, logError, mediaName, setPageBackground, storeGalleryTheme, storedGalleryTheme } from "../../utils";
+import { classNames, logError, setPageBackground, storeGalleryTheme, storedGalleryTheme } from "../../utils";
 import { getColumnCount, getColumnWidth, getItemHeight } from "./layout";
+import { PreviewImage, TileImage } from "./MediaTile";
 
 const RANDOM_IMAGE_LIMIT = 360;
 const AUTO_SCROLL_SPEED = 22;
@@ -26,7 +27,7 @@ interface CarouselColumn {
   direction: 1 | -1;
 }
 
-type PreviewState = { type: "image"; src: string } | null;
+type PreviewState = { type: "image"; src: string; path: string } | null;
 
 export function CarouselView() {
   const [preferences, setPreferences] = useState<GalleryPreferences | null>(null);
@@ -102,7 +103,9 @@ export function CarouselView() {
   const gapSize = preferences?.hasGap ? 12 : 0;
   const minColumnWidth = Math.min(600, Math.max(100, preferences?.minColumnWidth || 280));
   const columnCount = getColumnCount(viewport.width, gapSize, minColumnWidth);
-  const columnWidth = getColumnWidth(viewport.width, gapSize, minColumnWidth);
+  const columnWidth = gapSize === 0
+    ? Math.ceil(viewport.width / columnCount)
+    : getColumnWidth(viewport.width, gapSize, minColumnWidth);
   const columns = useMemo(
     () => buildCarouselColumns(records, columnCount, columnWidth, gapSize, viewport.height),
     [records, columnCount, columnWidth, gapSize, viewport.height],
@@ -189,7 +192,7 @@ export function CarouselView() {
   }
 
   function showPreview(record: ImageRecord) {
-    setPreview({ type: "image", src: convertFileSrc(record.path) });
+    setPreview({ type: "image", src: convertFileSrc(record.path), path: record.path });
   }
 
   if (!preferences) {
@@ -236,7 +239,7 @@ export function CarouselView() {
                       }}
                       onClick={() => showPreview(record)}
                     >
-                      <img loading="lazy" decoding="async" draggable={false} src={convertFileSrc(record.displayPath || record.path)} alt={mediaName(record.path)} />
+                      <TileImage record={record} />
                     </div>
                   ))}
                 </div>
@@ -255,7 +258,7 @@ function PreviewOverlay({ preview, onClose }: { preview: PreviewState; onClose: 
   return (
     <div className="preview image-preview" onClick={onClose}>
       <figure>
-        <img id="preview-image" src={preview.src} alt="" draggable={false} />
+        <PreviewImage src={preview.src} path={preview.path} />
       </figure>
     </div>
   );
