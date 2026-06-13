@@ -5,6 +5,8 @@
 mod commands;
 pub(crate) mod labels;
 pub(crate) mod state;
+#[cfg(desktop)]
+mod updates;
 
 use crate::{
     library::source_paths::start_resource_cleanup,
@@ -111,6 +113,10 @@ pub fn run() {
         .manage(Arc::new(Mutex::new(KeepAwake::default())) as KeepAwakeState)
         .plugin(tauri_plugin_dialog::init())
         .setup(|app| {
+            #[cfg(desktop)]
+            app.handle()
+                .plugin(tauri_plugin_updater::Builder::new().build())?;
+
             if let Err(err) = refresh_asset_scope(&app.handle().clone()) {
                 eprintln!("Failed to refresh asset scope: {err}");
             }
@@ -218,6 +224,10 @@ pub fn run() {
             commands::save_generated_image,
             commands::archive_xai_edit,
             commands::edit_image_with_xai,
+            #[cfg(desktop)]
+            commands::check_app_update,
+            #[cfg(desktop)]
+            commands::install_app_update,
             commands::load_editor_session,
             commands::save_editor_session,
             commands::list_images,

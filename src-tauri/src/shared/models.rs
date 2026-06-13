@@ -38,6 +38,7 @@ pub(crate) struct SettingsState {
     pub(crate) image_count: i64,
     pub(crate) db_path: String,
     pub(crate) generated_content_dir: String,
+    pub(crate) app_version: String,
     pub(crate) thumbnail_enabled: bool,
     pub(crate) thumbnail_dir: String,
     pub(crate) xai_key: String,
@@ -48,6 +49,16 @@ pub(crate) struct SettingsState {
     pub(crate) windows_close_behavior: String,
     pub(crate) windows_startup_enabled: bool,
     pub(crate) windows_startup_desktop_background: bool,
+}
+
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct AppUpdateInfo {
+    pub(crate) available: bool,
+    pub(crate) current_version: String,
+    pub(crate) version: Option<String>,
+    pub(crate) date: Option<String>,
+    pub(crate) body: Option<String>,
 }
 
 #[derive(Debug, Serialize)]

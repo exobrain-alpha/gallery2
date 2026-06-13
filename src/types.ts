@@ -28,6 +28,7 @@ export interface SettingsState {
   imageCount: number;
   dbPath: string;
   generatedContentDir: string;
+  appVersion: string;
   thumbnailEnabled: boolean;
   thumbnailDir: string;
   xaiKey: string;
@@ -38,6 +39,14 @@ export interface SettingsState {
   windowsCloseBehavior: WindowsCloseBehavior;
   windowsStartupEnabled: boolean;
   windowsStartupDesktopBackground: boolean;
+}
+
+export interface AppUpdateInfo {
+  available: boolean;
+  currentVersion: string;
+  version: string | null;
+  date: string | null;
+  body: string | null;
 }
 
 export interface WindowsStartupSettings {

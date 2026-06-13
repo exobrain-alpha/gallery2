@@ -27,3 +27,6 @@ rusqlite = { version = "=0.39.0", features = ["bundled"] }
 image = { version = "0.25.5", default-features = false, features = ["bmp", "gif", "jpeg", "png", "tiff", "webp"] }
 aes-gcm = "0.10.3"
 sha2 = "0.10.9"
+
+[target.'cfg(any(target_os = "macos", windows, target_os = "linux"))'.dependencies]
+tauri-plugin-updater = "2"

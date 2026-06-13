@@ -65,5 +65,16 @@
       "icons/icon.icns",
       "icons/icon.ico"
     ]
+  },
+  "plugins": {
+    "updater": {
+      "pubkey": "dW50cnVzdGVkIGNvbW1lbnQ6IG1pbmlzaWduIHB1YmxpYyBrZXk6IENGQjdFOTMwRjk1NzFCQ0UKUldUT0cxZjVNT20zendXN1hyUStjS0tKTDQzZEZ1VjNaZ2puTkwvcldWRXpTcmtVbWlIcW50WW0K",
+      "endpoints": [
+        "https://w200lab.com/website/gallery/releases/latest.json"
+      ],
+      "windows": {
+        "installMode": "passive"
+      }
+    }
   }
 }

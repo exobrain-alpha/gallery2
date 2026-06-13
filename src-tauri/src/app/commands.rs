@@ -2,6 +2,8 @@
 //! 负责参数整理、阻塞任务调度和把调用转发到具体业务模块。
 //! 复杂业务逻辑应下沉到 library/editor/window/storage 等系统模块。
 
+#[cfg(desktop)]
+use super::updates;
 use super::{
     labels::{CAROUSEL_LABEL, DESKTOP_BACKGROUND_LABEL, GALLERY_LABEL},
     state::{KeepAwakeState, ThumbnailProgressState, WindowsFullscreenRestoreState},
@@ -104,6 +106,7 @@ pub(crate) fn get_settings(app: tauri::AppHandle) -> Result<SettingsState, Strin
         image_count,
         db_path: user_path_string(&db_path(&app)?),
         generated_content_dir: user_path_string(&configured_generated_content_dir(&app, &conn)?),
+        app_version: app.package_info().version.to_string(),
         thumbnail_enabled: thumbnail_enabled(&conn)?,
         thumbnail_dir: user_path_string(&configured_thumbnail_dir(&app, &conn)?),
         xai_key: crate::storage::config::read_xai_key_config(&app, &conn)?,
@@ -226,6 +229,18 @@ pub(crate) fn save_xai_settings(
 #[tauri::command]
 pub(crate) fn get_xai_key_status(app: tauri::AppHandle) -> Result<XaiKeyStatus, String> {
     xai::get_xai_key_status(app)
+}
+
+#[cfg(desktop)]
+#[tauri::command]
+pub(crate) async fn check_app_update(app: tauri::AppHandle) -> Result<AppUpdateInfo, String> {
+    updates::check(app).await
+}
+
+#[cfg(desktop)]
+#[tauri::command]
+pub(crate) async fn install_app_update(app: tauri::AppHandle) -> Result<(), String> {
+    updates::install(app).await
 }
 
 #[tauri::command]

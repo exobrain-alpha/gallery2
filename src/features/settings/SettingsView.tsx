@@ -2,6 +2,7 @@ import { invoke } from '@tauri-apps/api/core';
 import { useEffect, useMemo, useState } from 'react';
 import { Icons } from '../../icons';
 import type {
+  AppUpdateInfo,
   DedupeSummary,
   ExtensionRepairSummary,
   ScanSummary,
@@ -23,6 +24,7 @@ import {
 
 type StatusTone = '' | 'ok' | 'error';
 type TaskName = 'scan' | 'dedupe' | 'repair';
+type UpdateTaskName = 'check' | 'install';
 type OpenTarget = 'gallery' | 'carousel';
 
 interface StatusState {
@@ -41,6 +43,7 @@ export function SettingsView() {
   const [savedPaths, setSavedPaths] = useState<string[]>([]);
   const [imageCount, setImageCount] = useState(0);
   const [dbPath, setDbPath] = useState('');
+  const [appVersion, setAppVersion] = useState('');
   const [xaiKey, setXaiKey] = useState('');
   const [savedXaiKey, setSavedXaiKey] = useState('');
   const [generatedDir, setGeneratedDir] = useState('');
@@ -61,6 +64,8 @@ export function SettingsView() {
   const [savedWindowsStartupDesktopBackground, setSavedWindowsStartupDesktopBackground] = useState(false);
   const [status, setStatus] = useState<StatusState>({ message: '', tone: '' });
   const [runningTask, setRunningTask] = useState<TaskName | null>(null);
+  const [updateInfo, setUpdateInfo] = useState<AppUpdateInfo | null>(null);
+  const [updateTask, setUpdateTask] = useState<UpdateTaskName | null>(null);
   const [openingWindow, setOpeningWindow] = useState<OpenTarget | null>(null);
   const [pickingGeneratedDir, setPickingGeneratedDir] = useState(false);
   const [addingPaths, setAddingPaths] = useState(false);
@@ -118,6 +123,8 @@ export function SettingsView() {
     setSavedPaths(loadedPaths);
     setImageCount(settings.imageCount);
     setDbPath(settings.dbPath);
+    setAppVersion(settings.appVersion || '');
+    setUpdateInfo(null);
     setXaiKey(settings.xaiKey || '');
     setSavedXaiKey(settings.xaiKey || '');
     setGeneratedDir(settings.generatedContentDir || '');
@@ -323,6 +330,45 @@ export function SettingsView() {
     );
   }
 
+  async function handleCheckUpdate() {
+    if (updateTask) return;
+
+    setUpdateTask('check');
+    setStatus({ message: '检查更新中...', tone: '' });
+    try {
+      const info = await invoke<AppUpdateInfo>('check_app_update');
+      setUpdateInfo(info);
+      setStatus({
+        message: info.available && info.version ? `发现新版本 ${info.version}` : '当前已是最新',
+        tone: 'ok',
+      });
+    } catch (error) {
+      setUpdateInfo(null);
+      setStatus({ message: formatErrorMessage(error, '检查更新失败'), tone: 'error' });
+    } finally {
+      setUpdateTask(null);
+    }
+  }
+
+  async function handleInstallUpdate() {
+    if (updateTask) return;
+    if (!updateInfo?.available) {
+      setStatus({ message: '请先检查更新', tone: 'error' });
+      return;
+    }
+
+    setUpdateTask('install');
+    setStatus({ message: '安装更新中...', tone: '' });
+    try {
+      await invoke('install_app_update');
+      setStatus({ message: '更新已安装，正在重启', tone: 'ok' });
+    } catch (error) {
+      setStatus({ message: formatErrorMessage(error, '安装更新失败'), tone: 'error' });
+    } finally {
+      setUpdateTask(null);
+    }
+  }
+
   async function handleOpenGallery() {
     if (openingWindow) return;
     setOpeningWindow('gallery');
@@ -480,6 +526,38 @@ export function SettingsView() {
                   <Icons.CheckBadge />
                   <span>检测重复</span>
                 </button>
+              </div>
+            </div>
+          </div>
+
+          <div className="field">
+            <span className="field-head">
+              <span className="field-label">
+                应用更新 {appVersion ? <span className="field-meta">v{appVersion}</span> : null}
+              </span>
+            </span>
+            <div className="field-body">
+              <div className="maintenance-actions">
+                <button
+                  className={`secondary-button task-button${updateTask === 'check' ? ' is-running' : ''}`}
+                  type="button"
+                  disabled={updateTask !== null}
+                  onClick={handleCheckUpdate}
+                >
+                  <Icons.ArrowPath />
+                  <span>{updateTask === 'check' ? '检查中' : '检查更新'}</span>
+                </button>
+                {updateInfo?.available ? (
+                  <button
+                    className={`primary-button task-button${updateTask === 'install' ? ' is-running' : ''}`}
+                    type="button"
+                    disabled={updateTask !== null}
+                    onClick={handleInstallUpdate}
+                  >
+                    <Icons.Download />
+                    <span>{updateTask === 'install' ? '安装中' : `安装 ${updateInfo.version || ''}`}</span>
+                  </button>
+                ) : null}
               </div>
             </div>
           </div>
