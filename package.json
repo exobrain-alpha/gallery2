@@ -14,7 +14,8 @@
     "tauri:build:win": "tauri build --bundles nsis",
     "tauri:build:win:msi": "tauri build --bundles msi",
     "tauri:build:linux": "tauri build --bundles appimage",
-    "signer:generate": "tauri signer generate -w ~/.tauri/gallery2.key",
+    "signer:generate": "node scripts/generate-signer-key.mjs",
+    "signer:generate:win": "node scripts/generate-signer-key.mjs",
     "updater:latest": "node scripts/generate-latest.mjs"
   },
   "dependencies": {
