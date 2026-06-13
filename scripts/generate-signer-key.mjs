@@ -73,7 +73,6 @@ function printHelp() {
 
 Usage:
   npm run signer:generate
-  npm run signer:generate:win
   npm run signer:generate -- --out ~/.tauri/gallery2.key
 
 Options:

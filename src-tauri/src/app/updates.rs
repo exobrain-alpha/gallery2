@@ -4,7 +4,39 @@
 use crate::shared::models::AppUpdateInfo;
 use tauri_plugin_updater::{Error as UpdaterError, UpdaterExt};
 
-pub(crate) async fn check(app: tauri::AppHandle) -> Result<AppUpdateInfo, String> {
+#[derive(Debug)]
+pub(crate) struct AppUpdateRuntimeState {
+    init_error: Option<String>,
+}
+
+impl AppUpdateRuntimeState {
+    fn ensure_ready(&self) -> Result<(), String> {
+        match &self.init_error {
+            Some(error) => Err(format!("更新服务初始化失败: {error}")),
+            None => Ok(()),
+        }
+    }
+}
+
+pub(crate) fn initialize(app: &tauri::AppHandle) -> AppUpdateRuntimeState {
+    match app.plugin(tauri_plugin_updater::Builder::new().build()) {
+        Ok(()) => AppUpdateRuntimeState { init_error: None },
+        Err(error) => {
+            let error = error.to_string();
+            eprintln!("Failed to initialize updater plugin: {error}");
+            AppUpdateRuntimeState {
+                init_error: Some(error),
+            }
+        }
+    }
+}
+
+pub(crate) async fn check(
+    app: tauri::AppHandle,
+    state: &AppUpdateRuntimeState,
+) -> Result<AppUpdateInfo, String> {
+    state.ensure_ready()?;
+
     let current_version = app.package_info().version.to_string();
     let update = app
         .updater()
@@ -31,7 +63,12 @@ pub(crate) async fn check(app: tauri::AppHandle) -> Result<AppUpdateInfo, String
     })
 }
 
-pub(crate) async fn install(app: tauri::AppHandle) -> Result<(), String> {
+pub(crate) async fn install(
+    app: tauri::AppHandle,
+    state: &AppUpdateRuntimeState,
+) -> Result<(), String> {
+    state.ensure_ready()?;
+
     let update = app
         .updater()
         .map_err(format_updater_error)?

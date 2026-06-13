@@ -29,6 +29,7 @@ use std::{
     sync::{Arc, Mutex},
 };
 use tauri::{
+    Manager,
     menu::{Menu, MenuItem, PredefinedMenuItem},
     tray::TrayIconBuilder,
 };
@@ -113,10 +114,6 @@ pub fn run() {
         .manage(Arc::new(Mutex::new(KeepAwake::default())) as KeepAwakeState)
         .plugin(tauri_plugin_dialog::init())
         .setup(|app| {
-            #[cfg(desktop)]
-            app.handle()
-                .plugin(tauri_plugin_updater::Builder::new().build())?;
-
             if let Err(err) = refresh_asset_scope(&app.handle().clone()) {
                 eprintln!("Failed to refresh asset scope: {err}");
             }
@@ -190,6 +187,8 @@ pub fn run() {
                 tray_builder = tray_builder.icon(icon);
             }
             tray_builder.build(app)?;
+            #[cfg(desktop)]
+            app.manage(updates::initialize(&app.handle().clone()));
             if launched_from_desktop_background_startup() {
                 let _ = desktop_background.set_text("关闭桌面背景");
                 spawn_show_desktop_background_window(app.handle().clone());

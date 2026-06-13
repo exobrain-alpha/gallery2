@@ -7,16 +7,10 @@
     "dev": "vite",
     "dev:app": "cargo tauri dev",
     "build": "tsc && vite build",
-    "build:app": "cargo tauri build",
+    "package:compile": "rustc --edition=2021 --crate-name gallery2_package scripts/package.rs",
     "preview": "vite preview",
     "tauri": "tauri",
-    "tauri:build:mac": "tauri build --bundles app,dmg",
-    "tauri:build:win": "tauri build --bundles nsis",
-    "tauri:build:win:msi": "tauri build --bundles msi",
-    "tauri:build:linux": "tauri build --bundles appimage",
-    "signer:generate": "node scripts/generate-signer-key.mjs",
-    "signer:generate:win": "node scripts/generate-signer-key.mjs",
-    "updater:latest": "node scripts/generate-latest.mjs"
+    "signer:generate": "node scripts/generate-signer-key.mjs"
   },
   "dependencies": {
     "@tauri-apps/api": "^2",

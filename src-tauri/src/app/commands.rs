@@ -233,14 +233,20 @@ pub(crate) fn get_xai_key_status(app: tauri::AppHandle) -> Result<XaiKeyStatus, 
 
 #[cfg(desktop)]
 #[tauri::command]
-pub(crate) async fn check_app_update(app: tauri::AppHandle) -> Result<AppUpdateInfo, String> {
-    updates::check(app).await
+pub(crate) async fn check_app_update(
+    app: tauri::AppHandle,
+    update_state: State<'_, updates::AppUpdateRuntimeState>,
+) -> Result<AppUpdateInfo, String> {
+    updates::check(app, update_state.inner()).await
 }
 
 #[cfg(desktop)]
 #[tauri::command]
-pub(crate) async fn install_app_update(app: tauri::AppHandle) -> Result<(), String> {
-    updates::install(app).await
+pub(crate) async fn install_app_update(
+    app: tauri::AppHandle,
+    update_state: State<'_, updates::AppUpdateRuntimeState>,
+) -> Result<(), String> {
+    updates::install(app, update_state.inner()).await
 }
 
 #[tauri::command]
