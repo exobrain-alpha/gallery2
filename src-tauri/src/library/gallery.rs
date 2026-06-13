@@ -1,5 +1,11 @@
-use crate::models::{ImageCursor, ImagePage, ImageRecord};
-use crate::{configured_thumbnail_dir, open_db, refresh_asset_scope_with_conn};
+//! 图库读取模型。
+//! 负责分页/随机查询 images 表，并为图片记录解析可用的缩略图展示路径。
+//! 不负责扫描入库或生成缩略图，这些流程由 library::scanner/thumbnail 处理。
+
+use crate::shared::models::{ImageCursor, ImagePage, ImageRecord};
+use crate::storage::{
+    asset_scope::refresh_asset_scope_with_conn, config::configured_thumbnail_dir, db::open_db,
+};
 use rusqlite::{params, Connection, OptionalExtension};
 use std::{fs, path::Path};
 use tauri::Manager;

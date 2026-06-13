@@ -1,3 +1,7 @@
+//! 前后端交互使用的数据结构定义。
+//! 保存 Tauri command 入参/出参、设置状态、图库记录、扫描结果和编辑会话模型。
+//! 这里不放行为逻辑，字段命名需保持与前端 camelCase 协议一致。
+
 use serde::{Deserialize, Serialize};
 
 #[derive(Debug, Serialize, Clone)]

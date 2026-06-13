@@ -1,11 +1,24 @@
-use crate::models::{DedupeSummary, ExtensionRepairSummary, ScanSummary, ThumbnailProgress};
+//! 素材库维护流程。
+//! 负责扫描素材目录、增量更新 images 表、去重移动、修复图片扩展名和缩略图生成任务。
+//! 文件格式识别和缩略图写入细节分别放在 media/thumbnail 中。
+
 use crate::{
-    collect_roots, configured_thumbnail_dir, content_hash, files_equal, image_extension_matches,
-    image_format, image_format_extension, is_supported_image, load_existing_media_records,
-    media_size, move_file, normalize_path, now_nanos, now_secs, open_db, paths_overlap,
-    thumbnail_cache_key, unique_destination_path, upsert_image, upsert_image_incremental,
-    visit_media, walk_media, write_image_thumbnail, CAROUSEL_LABEL, DEDUPE_MAX_FILE_SIZE,
-    DESKTOP_BACKGROUND_LABEL, GALLERY_LABEL,
+    app::labels::{CAROUSEL_LABEL, DESKTOP_BACKGROUND_LABEL, GALLERY_LABEL},
+    library::{
+        media::{
+            content_hash, files_equal, image_extension_matches, image_format,
+            image_format_extension, is_supported_image, load_existing_media_records, media_size,
+            upsert_image, upsert_image_incremental, visit_media, walk_media,
+        },
+        source_paths::collect_roots,
+        thumbnail::{thumbnail_cache_key, write_image_thumbnail},
+    },
+    shared::{
+        models::{DedupeSummary, ExtensionRepairSummary, ScanSummary, ThumbnailProgress},
+        path_utils::{move_file, normalize_path, paths_overlap, unique_destination_path},
+        time::{now_nanos, now_secs},
+    },
+    storage::{config::configured_thumbnail_dir, db::open_db},
 };
 use rusqlite::{params, Connection, OptionalExtension};
 use std::{
@@ -15,6 +28,8 @@ use std::{
     sync::{Arc, Mutex},
 };
 use tauri::Manager;
+
+const DEDUPE_MAX_FILE_SIZE: u64 = 100 * 1024 * 1024;
 
 #[allow(dead_code)]
 struct ThumbnailSource {
