@@ -1,6 +1,6 @@
 # Gallery
 
-Gallery 是一个基于 Tauri 2、React、TypeScript 和 SQLite 的本地媒体图库应用。官网：[https://aihouzi.com/gallery](https://aihouzi.com/gallery)。
+Gallery 是一个基于 Tauri 2、React、TypeScript 和 SQLite 的本地媒体图库应用。官网：[https://aihouzi.com/gallery](https://aihouzi.cn/gallery)。
 
 它支持本地图片和视频目录管理、媒体扫描、瀑布流图库浏览、全屏预览、走马灯展示、桌面背景模式、缩略图生成、重复资源整理、图片扩展名修复、xAI 图片编辑、应用设置和更新检查。应用通过 Rust 后端统一管理窗口、文件访问、图库扫描、缩略图、持久化配置和系统集成能力，前端负责图库、走马灯、设置和图片编辑等交互界面。
 
