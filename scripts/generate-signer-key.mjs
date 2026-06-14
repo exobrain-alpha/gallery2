@@ -1,18 +1,28 @@
 #!/usr/bin/env node
 
 import { spawn } from "node:child_process";
+import { existsSync, readFileSync } from "node:fs";
 import { mkdir } from "node:fs/promises";
-import { homedir } from "node:os";
-import { dirname, join, resolve } from "node:path";
+import { dirname, isAbsolute, resolve } from "node:path";
+
+const ENV_FILE_NAME = ".env";
+const ENV_SIGNING_KEY_PATH = "GALLERY_SIGNING_KEY_PATH";
 
 const args = parseArgs(process.argv.slice(2));
+const envFile = loadEnvFile(resolve(process.cwd(), ENV_FILE_NAME));
 
 if (args.help) {
   printHelp();
   process.exit(0);
 }
 
-const keyPath = expandHome(args.out || args.writeKey || join(homedir(), ".tauri", "gallery2.key"));
+const configuredKeyPath = getConfiguredSigningKeyPath(envFile);
+const explicitKeyPath = args.out || args.writeKey;
+const keyPathValue = explicitKeyPath || configuredKeyPath;
+if (!keyPathValue) {
+  fail(`Missing signing key path. Set ${ENV_SIGNING_KEY_PATH} in ${ENV_FILE_NAME}, or pass --out <path>.`);
+}
+const keyPath = explicitKeyPath ? resolve(explicitKeyPath) : keyPathValue;
 await mkdir(dirname(keyPath), { recursive: true });
 
 const exitCode = await runTauri(["signer", "generate", "-w", keyPath]);
@@ -48,12 +58,45 @@ function parseArgs(argv) {
   return parsed;
 }
 
-function expandHome(path) {
-  if (path === "~") return homedir();
-  if (path.startsWith("~/") || path.startsWith("~\\")) {
-    return resolve(homedir(), path.slice(2));
+function loadEnvFile(path) {
+  if (!existsSync(path)) return {};
+  const entries = {};
+  const lines = readFileSync(path, "utf8").split(/\r?\n/);
+  lines.forEach((rawLine, index) => {
+    let line = rawLine.trim();
+    if (!line || line.startsWith("#")) return;
+    if (line.startsWith("export ")) line = line.slice("export ".length).trimStart();
+    const separator = line.indexOf("=");
+    if (separator === -1) {
+      fail(`${ENV_FILE_NAME}:${index + 1} is missing "=".`);
+    }
+    const key = line.slice(0, separator).trim();
+    if (!/^[A-Z0-9_]+$/.test(key)) {
+      fail(`${ENV_FILE_NAME}:${index + 1} has invalid key: ${key}`);
+    }
+    entries[key] = parseEnvValue(line.slice(separator + 1));
+  });
+  return entries;
+}
+
+function getConfiguredSigningKeyPath(envFile) {
+  const value = process.env[ENV_SIGNING_KEY_PATH] || envFile[ENV_SIGNING_KEY_PATH];
+  if (!value) return undefined;
+  if (!isAbsolute(value)) {
+    fail(`${ENV_SIGNING_KEY_PATH} must be an absolute path. Do not use relative paths or ~.`);
   }
-  return resolve(path);
+  return value;
+}
+
+function parseEnvValue(value) {
+  const trimmed = value.trim();
+  if (trimmed.length >= 2) {
+    const quote = trimmed[0];
+    if ((quote === "\"" || quote === "'") && trimmed.endsWith(quote)) {
+      return trimmed.slice(1, -1);
+    }
+  }
+  return trimmed;
 }
 
 function runTauri(tauriArgs) {
@@ -73,11 +116,17 @@ function printHelp() {
 
 Usage:
   npm run signer:generate
-  npm run signer:generate -- --out ~/.tauri/gallery2.key
+  npm run signer:generate -- --out /path/to/gallery2.key
 
 Options:
-  --out <path>        Key output path. Defaults to <home>/.tauri/gallery2.key.
+  --out <path>        Key output path. Defaults to ${ENV_FILE_NAME} -> ${ENV_SIGNING_KEY_PATH}.
   --write-key <path>  Alias of --out.
+
+Env:
+  ${ENV_SIGNING_KEY_PATH}=/path/to/gallery2.key
+
+Notes:
+  ${ENV_SIGNING_KEY_PATH} only supports absolute paths. Do not use relative paths or ~.
 `);
 }
 

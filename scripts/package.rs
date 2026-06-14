@@ -1,3 +1,4 @@
+use std::collections::HashMap;
 use std::env;
 use std::ffi::OsStr;
 use std::fs;
@@ -6,8 +7,9 @@ use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::time::SystemTime;
 
-const DEFAULT_KEY_FILE_NAME: &str = "gallery2.key";
-const DEFAULT_RELEASES_ROOT: &str = "https://w200lab.com/website/gallery/releases";
+const ENV_FILE_NAME: &str = ".env";
+const ENV_RELEASES_ROOT_URL: &str = "GALLERY_RELEASES_ROOT_URL";
+const ENV_SIGNING_KEY_PATH: &str = "GALLERY_SIGNING_KEY_PATH";
 
 fn main() {
     if let Err(message) = run() {
@@ -24,6 +26,7 @@ fn run() -> Result<(), String> {
     }
 
     let repo_root = find_repo_root()?;
+    let env_config = EnvConfig::load(&repo_root)?;
     let config_path = repo_root.join("src-tauri").join("tauri.conf.json");
     let mut config_text = fs::read_to_string(&config_path)
         .map_err(|error| format!("读取 Tauri 配置失败: {} ({error})", config_path.display()))?;
@@ -41,26 +44,36 @@ fn run() -> Result<(), String> {
         }
     }
 
-    let private_key_path = default_private_key_path()?;
+    let private_key_path = env_config.absolute_path(ENV_SIGNING_KEY_PATH)?;
 
     let missing_public_key = config.pubkey.trim().is_empty();
-    let missing_private_key = !private_key_path.is_file();
-    let empty_private_key = private_key_path.is_file()
-        && fs::read_to_string(&private_key_path)
-            .map(|content| content.trim().is_empty())
-            .unwrap_or(true);
+    let missing_private_key = private_key_path
+        .as_ref()
+        .map(|path| !path.is_file())
+        .unwrap_or(true);
+    let empty_private_key = private_key_path
+        .as_ref()
+        .filter(|path| path.is_file())
+        .map(|path| {
+            fs::read_to_string(path)
+                .map(|content| content.trim().is_empty())
+                .unwrap_or(true)
+        })
+        .unwrap_or(false);
 
     if missing_public_key || missing_private_key || empty_private_key {
         print_key_configuration_hint(
             &repo_root,
             &config_path,
-            &private_key_path,
+            private_key_path.as_deref(),
             missing_public_key,
             missing_private_key,
             empty_private_key,
         );
         return Err("未检测到完整的更新包签名公私钥配置，已退出。".to_string());
     }
+    let private_key_path = private_key_path
+        .ok_or_else(|| format!("请在 {ENV_FILE_NAME} 或环境变量中设置 {ENV_SIGNING_KEY_PATH}。"))?;
 
     if !config.create_updater_artifacts {
         return Err(
@@ -70,17 +83,24 @@ fn run() -> Result<(), String> {
     }
 
     let platform = Platform::current()?;
-    let release_base_url = args.base_url.unwrap_or_else(|| {
-        format!(
-            "{}/{}",
-            trim_trailing_slashes(
-                &config
-                    .release_base_url()
-                    .unwrap_or_else(|| DEFAULT_RELEASES_ROOT.to_string())
-            ),
-            config.version
-        )
-    });
+    let release_base_url = match args.base_url {
+        Some(base_url) => base_url,
+        None => {
+            let release_root_url = env_config
+                .get(ENV_RELEASES_ROOT_URL)
+                .or_else(|| config.release_base_url())
+                .ok_or_else(|| {
+                    format!(
+                        "请通过 --base-url、{ENV_FILE_NAME} 的 {ENV_RELEASES_ROOT_URL}，或 updater endpoint 配置产物 URL 前缀。"
+                    )
+                })?;
+            format!(
+                "{}/{}",
+                trim_trailing_slashes(&release_root_url),
+                config.version
+            )
+        }
+    };
     let output_path = args
         .out
         .map(|path| {
@@ -149,6 +169,100 @@ fn run() -> Result<(), String> {
         artifact.url(&release_base_url)
     );
     Ok(())
+}
+
+#[derive(Debug)]
+struct EnvConfig {
+    values: HashMap<String, String>,
+}
+
+impl EnvConfig {
+    fn load(repo_root: &Path) -> Result<Self, String> {
+        let path = repo_root.join(ENV_FILE_NAME);
+        let values = if path.is_file() {
+            let source = fs::read_to_string(&path)
+                .map_err(|error| format!("读取 env 文件失败: {} ({error})", path.display()))?;
+            parse_env_file(&source)?
+        } else {
+            HashMap::new()
+        };
+
+        Ok(EnvConfig { values })
+    }
+
+    fn get(&self, key: &str) -> Option<String> {
+        env::var(key)
+            .ok()
+            .filter(|value| !value.trim().is_empty())
+            .or_else(|| {
+                self.values
+                    .get(key)
+                    .filter(|value| !value.trim().is_empty())
+                    .cloned()
+            })
+    }
+
+    fn absolute_path(&self, key: &str) -> Result<Option<PathBuf>, String> {
+        self.get(key)
+            .map(|value| parse_absolute_env_path(key, &value))
+            .transpose()
+    }
+}
+
+fn parse_absolute_env_path(key: &str, value: &str) -> Result<PathBuf, String> {
+    let path = PathBuf::from(value);
+    if path.is_absolute() {
+        Ok(path)
+    } else {
+        Err(format!(
+            "{key} 只支持绝对路径，请使用 /Users/...、C:\\... 或 UNC 路径，不要使用相对路径或 ~。"
+        ))
+    }
+}
+
+fn parse_env_file(source: &str) -> Result<HashMap<String, String>, String> {
+    let mut values = HashMap::new();
+    for (line_index, raw_line) in source.lines().enumerate() {
+        let mut line = raw_line.trim();
+        if line.is_empty() || line.starts_with('#') {
+            continue;
+        }
+        if let Some(rest) = line.strip_prefix("export ") {
+            line = rest.trim_start();
+        }
+        let Some((key, value)) = line.split_once('=') else {
+            return Err(format!(
+                "{} 第 {} 行缺少 '='。",
+                ENV_FILE_NAME,
+                line_index + 1
+            ));
+        };
+        let key = key.trim();
+        if key.is_empty()
+            || !key.chars().all(|character| {
+                character.is_ascii_uppercase() || character.is_ascii_digit() || character == '_'
+            })
+        {
+            return Err(format!(
+                "{} 第 {} 行变量名无效: {key}",
+                ENV_FILE_NAME,
+                line_index + 1
+            ));
+        }
+        values.insert(key.to_string(), parse_env_value(value));
+    }
+    Ok(values)
+}
+
+fn parse_env_value(value: &str) -> String {
+    let value = value.trim();
+    if value.len() >= 2 {
+        let quote = value.as_bytes()[0];
+        if matches!(quote, b'\'' | b'"') && value.as_bytes().last() == Some(&quote) {
+            return value[1..value.len() - 1].to_string();
+        }
+    }
+    value.to_string()
 }
 
 #[derive(Debug)]
@@ -572,42 +686,28 @@ fn find_repo_root_from(start: &Path) -> Option<PathBuf> {
     None
 }
 
-fn default_private_key_path() -> Result<PathBuf, String> {
-    let home =
-        home_dir().ok_or_else(|| "无法识别用户主目录，不能检查默认私钥路径。".to_string())?;
-    Ok(home.join(".tauri").join(DEFAULT_KEY_FILE_NAME))
-}
-
-fn home_dir() -> Option<PathBuf> {
-    if let Some(home) = env::var_os("HOME") {
-        return Some(PathBuf::from(home));
-    }
-    if let Some(profile) = env::var_os("USERPROFILE") {
-        return Some(PathBuf::from(profile));
-    }
-
-    let drive = env::var_os("HOMEDRIVE")?;
-    let path = env::var_os("HOMEPATH")?;
-    Some(PathBuf::from(format!(
-        "{}{}",
-        drive.to_string_lossy(),
-        path.to_string_lossy()
-    )))
-}
-
 fn print_key_configuration_hint(
     repo_root: &Path,
     config_path: &Path,
-    private_key_path: &Path,
+    private_key_path: Option<&Path>,
     missing_public_key: bool,
     missing_private_key: bool,
     empty_private_key: bool,
 ) {
     println!("未检测到完整的 Tauri updater 签名公私钥配置。");
     if missing_private_key {
-        println!("缺少默认私钥文件: {}", private_key_path.display());
+        if let Some(path) = private_key_path {
+            println!("缺少私钥文件: {}", path.display());
+        } else {
+            println!(
+                "缺少私钥路径配置: 请在 {} 或环境变量中设置 {}，且必须使用绝对路径。",
+                ENV_FILE_NAME, ENV_SIGNING_KEY_PATH
+            );
+        }
     } else if empty_private_key {
-        println!("默认私钥文件为空: {}", private_key_path.display());
+        if let Some(path) = private_key_path {
+            println!("私钥文件为空: {}", path.display());
+        }
     }
     if missing_public_key {
         println!(
@@ -618,7 +718,7 @@ fn print_key_configuration_hint(
     println!("请在仓库内执行 package.json 已配置命令生成密钥:");
     println!("  npm run signer:generate");
     println!(
-        "然后把命令输出的 public key 写入 src-tauri/tauri.conf.json 的 plugins.updater.pubkey。"
+        "然后把命令输出的 public key 写入 src-tauri/tauri.conf.json 的 plugins.updater.pubkey，并把私钥路径写入 {} 的 {}。", ENV_FILE_NAME, ENV_SIGNING_KEY_PATH
     );
     println!("仓库: {}", repo_root.display());
 }
@@ -829,13 +929,20 @@ Usage:
   .\\gallery2_package.exe
 
 Options:
-  --base-url <url>  覆盖产物 URL 前缀，默认从 updater endpoint 推导到当前版本目录。
+  --base-url <url>  覆盖产物 URL 前缀；未传入时从 env release 根 URL 或 updater endpoint 推导到当前版本目录。
   --out <path>      覆盖 latest.json 输出路径。
   --dry-run         只检查配置并打印将执行的构建命令。
   --help            显示帮助。
 
-默认签名配置:
-  私钥: <home>/.tauri/gallery2.key
+env 配置:
+  GALLERY_SIGNING_KEY_PATH=<absolute-path>
+  GALLERY_RELEASES_ROOT_URL=https://example.com/releases
+
+说明:
+  GALLERY_SIGNING_KEY_PATH 只支持绝对路径，不支持相对路径或 ~。
+
+签名配置:
+  私钥: .env -> GALLERY_SIGNING_KEY_PATH
   公钥: src-tauri/tauri.conf.json -> plugins.updater.pubkey
 "
     );

@@ -11,8 +11,11 @@ node_modules
 dist
 dist-ssr
 /gallery2_package
-/gallery2_package.exe
+/gallery2_package.*
 *.local
+.env
+.env.*
+!.env.example
 
 # Editor directories and files
 .vscode/*
