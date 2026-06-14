@@ -7,24 +7,26 @@ use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::time::SystemTime;
 
-const ENV_FILE_NAME: &str = ".env";
-const ENV_RELEASES_ROOT_URL: &str = "GALLERY_RELEASES_ROOT_URL";
-const ENV_SIGNING_KEY_PATH: &str = "GALLERY_SIGNING_KEY_PATH";
+pub const ENV_FILE_NAME: &str = ".env";
+pub const ENV_RELEASES_ROOT_URL: &str = "GALLERY_RELEASES_ROOT_URL";
+pub const ENV_SIGNING_KEY_PATH: &str = "GALLERY_SIGNING_KEY_PATH";
 
-fn main() {
-    if let Err(message) = run() {
-        eprintln!("{message}");
-        std::process::exit(1);
-    }
-}
+pub type BuildEnvVars = Vec<(String, String)>;
+pub type PlatformEnvLoader = fn(&EnvConfig) -> Result<BuildEnvVars, String>;
+pub type PlatformHelpPrinter = fn();
 
-fn run() -> Result<(), String> {
+pub fn run(
+    target: PackageTarget,
+    load_platform_env: PlatformEnvLoader,
+    print_platform_help: PlatformHelpPrinter,
+) -> Result<(), String> {
     let args = Args::parse(env::args().skip(1).collect())?;
     if args.help {
-        print_help();
+        print_help(target, print_platform_help);
         return Ok(());
     }
 
+    target.validate_host()?;
     let repo_root = find_repo_root()?;
     let env_config = EnvConfig::load(&repo_root)?;
     let config_path = repo_root.join("src-tauri").join("tauri.conf.json");
@@ -82,7 +84,7 @@ fn run() -> Result<(), String> {
         );
     }
 
-    let platform = Platform::current()?;
+    let platform_env = load_platform_env(&env_config)?;
     let release_base_url = match args.base_url {
         Some(base_url) => base_url,
         None => {
@@ -131,11 +133,14 @@ fn run() -> Result<(), String> {
         ));
     }
 
-    let build_steps = platform.build_steps();
+    let build_steps = target.build_steps();
     if args.dry_run {
         println!("仓库: {}", repo_root.display());
         println!("私钥: {}", private_key_path.display());
-        println!("平台: {}", platform.platform_key());
+        println!("平台: {}", target.platform_key());
+        if !platform_env.is_empty() {
+            println!("将转发平台环境变量: {}", env_var_names(&platform_env));
+        }
         for step in &build_steps {
             println!("将执行: node {} {}", tauri_script.display(), step.join(" "));
         }
@@ -150,14 +155,21 @@ fn run() -> Result<(), String> {
     let private_key = private_key.trim().to_string();
 
     for step in &build_steps {
-        run_tauri_build(&repo_root, &tauri_script, step, &private_key, &password)?;
+        run_tauri_build(
+            &repo_root,
+            &tauri_script,
+            step,
+            &private_key,
+            &password,
+            &platform_env,
+        )?;
     }
 
-    let artifact = find_updater_artifact(&repo_root, platform, &config.version)?;
+    let artifact = find_updater_artifact(&repo_root, target, &config.version)?;
     write_latest_json(
         &output_path,
         &config,
-        platform,
+        target,
         &artifact,
         &release_base_url,
     )?;
@@ -165,14 +177,14 @@ fn run() -> Result<(), String> {
     println!("已更新 {}", output_path.display());
     println!(
         "{}: {}",
-        platform.platform_key(),
+        target.platform_key(),
         artifact.url(&release_base_url)
     );
     Ok(())
 }
 
 #[derive(Debug)]
-struct EnvConfig {
+pub struct EnvConfig {
     values: HashMap<String, String>,
 }
 
@@ -190,7 +202,7 @@ impl EnvConfig {
         Ok(EnvConfig { values })
     }
 
-    fn get(&self, key: &str) -> Option<String> {
+    pub fn get(&self, key: &str) -> Option<String> {
         env::var(key)
             .ok()
             .filter(|value| !value.trim().is_empty())
@@ -202,7 +214,7 @@ impl EnvConfig {
             })
     }
 
-    fn absolute_path(&self, key: &str) -> Result<Option<PathBuf>, String> {
+    pub fn absolute_path(&self, key: &str) -> Result<Option<PathBuf>, String> {
         self.get(key)
             .map(|value| parse_absolute_env_path(key, &value))
             .transpose()
@@ -311,38 +323,78 @@ impl Args {
     }
 }
 
+#[allow(dead_code)]
 #[derive(Clone, Copy, Debug)]
-enum Platform {
-    Linux,
+pub enum PackageTarget {
     Mac,
     Windows,
 }
 
-impl Platform {
-    fn current() -> Result<Self, String> {
-        match env::consts::OS {
-            "linux" => Ok(Platform::Linux),
-            "macos" => Ok(Platform::Mac),
-            "windows" => Ok(Platform::Windows),
-            other => Err(format!("不支持的打包平台: {other}")),
+impl PackageTarget {
+    fn validate_host(self) -> Result<(), String> {
+        let expected = match self {
+            PackageTarget::Mac => "macos",
+            PackageTarget::Windows => "windows",
+        };
+        if env::consts::OS == expected {
+            return Ok(());
         }
+
+        Err(format!(
+            "当前系统是 {}，不能运行 {} 打包入口。",
+            env::consts::OS,
+            self.display_name()
+        ))
     }
 
     fn build_steps(self) -> Vec<Vec<&'static str>> {
         match self {
-            Platform::Linux => vec![vec!["build", "--bundles", "appimage"]],
-            Platform::Mac => vec![vec!["build", "--bundles", "app,dmg"]],
-            Platform::Windows => vec![vec!["build", "--bundles", "nsis"]],
+            PackageTarget::Mac => vec![vec!["build", "--bundles", "app,dmg"]],
+            PackageTarget::Windows => vec![vec!["build", "--bundles", "nsis"]],
         }
     }
 
     fn platform_key(self) -> String {
         let os = match self {
-            Platform::Linux => "linux",
-            Platform::Mac => "darwin",
-            Platform::Windows => "windows",
+            PackageTarget::Mac => "darwin",
+            PackageTarget::Windows => "windows",
         };
         format!("{os}-{}", updater_arch())
+    }
+
+    fn artifact_bundle_dir(self) -> &'static str {
+        match self {
+            PackageTarget::Mac => "macos",
+            PackageTarget::Windows => "nsis",
+        }
+    }
+
+    fn updater_signature_suffixes(self) -> &'static [&'static str] {
+        match self {
+            PackageTarget::Mac => &[".app.tar.gz.sig"],
+            PackageTarget::Windows => &[".exe.sig", ".nsis.zip.sig"],
+        }
+    }
+
+    fn display_name(self) -> &'static str {
+        match self {
+            PackageTarget::Mac => "macOS",
+            PackageTarget::Windows => "Windows",
+        }
+    }
+
+    fn compile_script_name(self) -> &'static str {
+        match self {
+            PackageTarget::Mac => "package:compile:mac",
+            PackageTarget::Windows => "package:compile:windows",
+        }
+    }
+
+    fn binary_name(self) -> &'static str {
+        match self {
+            PackageTarget::Mac => "./gallery2_package_macos",
+            PackageTarget::Windows => ".\\gallery2_package_windows.exe",
+        }
     }
 }
 
@@ -412,14 +464,22 @@ fn run_tauri_build(
     args: &[&str],
     private_key: &str,
     password: &str,
+    platform_env: &[(String, String)],
 ) -> Result<(), String> {
     println!("执行: node {} {}", tauri_script.display(), args.join(" "));
-    let status = Command::new("node")
+    let mut command = Command::new("node");
+    command
         .arg(tauri_script)
         .args(args)
         .current_dir(repo_root)
         .env("TAURI_SIGNING_PRIVATE_KEY", private_key)
-        .env("TAURI_SIGNING_PRIVATE_KEY_PASSWORD", password)
+        .env("TAURI_SIGNING_PRIVATE_KEY_PASSWORD", password);
+
+    for (key, value) in platform_env {
+        command.env(key, value);
+    }
+
+    let status = command
         .status()
         .map_err(|error| format!("启动 Tauri 构建失败: {error}"))?;
 
@@ -432,7 +492,7 @@ fn run_tauri_build(
 
 fn find_updater_artifact(
     repo_root: &Path,
-    platform: Platform,
+    target: PackageTarget,
     version: &str,
 ) -> Result<UpdaterArtifact, String> {
     let bundle_root = repo_root
@@ -441,16 +501,10 @@ fn find_updater_artifact(
         .join("release")
         .join("bundle");
 
-    let candidates = match platform {
-        Platform::Mac => collect_candidates(&bundle_root.join("macos"), &[".app.tar.gz.sig"])?,
-        Platform::Linux => collect_candidates(
-            &bundle_root.join("appimage"),
-            &[".AppImage.sig", ".AppImage.tar.gz.sig"],
-        )?,
-        Platform::Windows => {
-            collect_candidates(&bundle_root.join("nsis"), &[".exe.sig", ".nsis.zip.sig"])?
-        }
-    };
+    let candidates = collect_candidates(
+        &bundle_root.join(target.artifact_bundle_dir()),
+        target.updater_signature_suffixes(),
+    )?;
 
     choose_latest_candidate(candidates, version).ok_or_else(|| {
         format!(
@@ -524,7 +578,7 @@ fn choose_latest_candidate(
 fn write_latest_json(
     output_path: &Path,
     config: &AppConfig,
-    platform: Platform,
+    target: PackageTarget,
     artifact: &UpdaterArtifact,
     release_base_url: &str,
 ) -> Result<(), String> {
@@ -547,7 +601,7 @@ fn write_latest_json(
             .map_err(|error| format!("创建输出目录失败: {} ({error})", parent.display()))?;
     }
 
-    let platform_key = platform.platform_key();
+    let platform_key = target.platform_key();
     let latest_json = format!(
         "{{\n  \"version\": \"{}\",\n  \"notes\": \"{} {}\",\n  \"platforms\": {{\n    \"{}\": {{\n      \"signature\": \"{}\",\n      \"url\": \"{}\"\n    }}\n  }}\n}}\n",
         json_escape(&config.version),
@@ -751,6 +805,14 @@ fn modified_time(path: &Path) -> SystemTime {
         .unwrap_or(SystemTime::UNIX_EPOCH)
 }
 
+fn env_var_names(values: &[(String, String)]) -> String {
+    values
+        .iter()
+        .map(|(key, _)| key.as_str())
+        .collect::<Vec<_>>()
+        .join(", ")
+}
+
 fn trim_trailing_slashes(value: &str) -> String {
     value.trim_end_matches('/').to_string()
 }
@@ -919,14 +981,13 @@ fn url_path_segment(value: &str) -> String {
     output
 }
 
-fn print_help() {
+fn print_help(target: PackageTarget, print_platform_help: PlatformHelpPrinter) {
     println!(
         "Gallery updater packaging helper
 
 Usage:
-  npm run package:compile
-  ./gallery2_package
-  .\\gallery2_package.exe
+  npm run {}
+  {}
 
 Options:
   --base-url <url>  覆盖产物 URL 前缀；未传入时从 env release 根 URL 或 updater endpoint 推导到当前版本目录。
@@ -944,6 +1005,12 @@ env 配置:
 签名配置:
   私钥: .env -> GALLERY_SIGNING_KEY_PATH
   公钥: src-tauri/tauri.conf.json -> plugins.updater.pubkey
-"
+平台:
+  当前入口: {}
+",
+        target.compile_script_name(),
+        target.binary_name(),
+        target.display_name()
     );
+    print_platform_help();
 }

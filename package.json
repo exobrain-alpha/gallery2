@@ -8,7 +8,8 @@
     "dev": "vite",
     "dev:app": "cargo tauri dev",
     "build": "tsc && vite build",
-    "package:compile": "rustc --edition=2021 --crate-name gallery2_package scripts/package.rs",
+    "package:compile:mac": "rustc --edition=2021 --crate-name gallery2_package scripts/package_macos.rs -o gallery2_package_macos",
+    "package:compile:windows": "rustc --edition=2021 --crate-name gallery2_package scripts/package_windows.rs -o gallery2_package_windows.exe",
     "preview": "vite preview",
     "tauri": "tauri",
     "signer:generate": "node scripts/generate-signer-key.mjs"
